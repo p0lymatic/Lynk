@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="lynk_bg">#FF0F0F11</color>
+
+    <style name="Theme.Lynk" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/lynk_bg</item>
+        <item name="android:statusBarColor">@color/lynk_bg</item>
+        <item name="android:navigationBarColor">@color/lynk_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorBackground">@color/lynk_bg</item>
+    </style>
+</resources>
