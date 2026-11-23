@@ -116,6 +116,45 @@ fun metricValueText(kind: MetricKind, metrics: NodeMetrics?): String {
     }
 }
 
+/**
+ * Short form for the ring: it has room for a percentage or a couple of glyphs, not for
+ * "7.0 / 7.7 ГБ". The detailed numbers belong to the bar and text styles.
+ */
+fun metricRingText(kind: MetricKind, metrics: NodeMetrics?): String {
+    if (metrics == null) return "—"
+    return when (kind) {
+        MetricKind.CPU, MetricKind.RAM, MetricKind.SWAP, MetricKind.DISK ->
+            metricPercent(kind, metrics)?.let { "${it.toInt()}%" } ?: "—"
+        MetricKind.LOAD -> metrics.load1?.let { String.format(Locale.US, "%.2f", it) } ?: "—"
+        MetricKind.TEMP -> metrics.tempC?.let { "${it.toInt()}°" } ?: "—"
+        MetricKind.NET -> when {
+            metrics.rxBps != null -> shortRate(metrics.rxBps)
+            else -> "—"
+        }
+        MetricKind.UPTIME -> metrics.uptimeSec?.let { shortUptime(it) } ?: "—"
+    }
+}
+
+private fun shortRate(bytes: Long): String {
+    val kb = bytes / 1024f
+    return when {
+        kb >= 1024f -> String.format(Locale.US, "%.1fМ", kb / 1024f)
+        kb >= 10f -> String.format(Locale.US, "%.0fК", kb)
+        else -> String.format(Locale.US, "%.1fК", kb)
+    }
+}
+
+private fun shortUptime(seconds: Long): String {
+    val days = seconds / 86_400
+    val hours = seconds % 86_400 / 3_600
+    val minutes = seconds % 3_600 / 60
+    return when {
+        days > 0 -> "${days}д"
+        hours > 0 -> "${hours}ч"
+        else -> "${minutes}м"
+    }
+}
+
 @Composable
 fun MetricTile(pref: MetricPref, metrics: NodeMetrics?, modifier: Modifier = Modifier) {
     when (pref.style) {
@@ -197,12 +236,12 @@ private fun RingTile(pref: MetricPref, metrics: NodeMetrics?, modifier: Modifier
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (pref.showValue) {
                     Text(
-                        text = metricValueText(pref.kind, metrics).substringBefore(" ·"),
+                        text = metricRingText(pref.kind, metrics),
                         fontFamily = Mono,
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         color = LynkColors.text,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        overflow = TextOverflow.Clip,
                     )
                 }
                 if (pref.showLabel) {

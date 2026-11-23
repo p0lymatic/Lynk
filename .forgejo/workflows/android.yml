@@ -6,8 +6,9 @@
 name: Android CI
 
 on:
+  # Ветка main не триггерит сборку: раннер живёт на том же VPS, что и рабочие сервисы,
+  # и полная сборка съедает его CPU. Пуши собирает GitHub Actions, здесь — теги и ручной запуск.
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
