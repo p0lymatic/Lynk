@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -39,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -79,6 +81,23 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
     var status by remember { mutableStateOf(TerminalSession.Status.CONNECTING) }
     var error by remember { mutableStateOf<String?>(null) }
     var rowsData by remember { mutableStateOf<List<RowSnapshot>>(emptyList()) }
+    var historyOffset by remember { mutableStateOf(0) }
+    var historyLinesAdded by remember { mutableStateOf(0L) }
+
+    fun showViewport() {
+        val screen = session?.screen ?: return
+        synchronized(screen) {
+            historyOffset = historyOffset.coerceIn(0, screen.scrollbackSize)
+            rowsData = screen.viewport(historyOffset)
+            historyLinesAdded = screen.historyLinesAdded
+        }
+    }
+
+    fun jumpToLive() {
+        historyOffset = 0
+        showViewport()
+    }
+
     var ctrlArmed by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
     var cols by remember { mutableStateOf(80) }
@@ -90,6 +109,7 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
     val inputHolder = remember { arrayOfNulls<TerminalInputView>(1) }
 
     fun send(bytes: ByteArray) {
+        jumpToLive()
         val target = session ?: return
         if (ctrlArmed && bytes.size == 1) {
             val code = bytes[0].toInt() and 0xFF
@@ -115,6 +135,8 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         session?.close()
         session = null
         rowsData = emptyList()
+        historyOffset = 0
+        historyLinesAdded = 0
         error = null
         status = TerminalSession.Status.CONNECTING
         try {
@@ -134,7 +156,18 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         launch { current.status.collect { status = it } }
         launch { current.error.collect { error = it } }
         // Snapshot this session even when its initial revision equals the previous one's.
-        current.revision.collect { rowsData = current.screen.snapshot() }
+        launch { current.inputRevision.collect { jumpToLive() } }
+        current.revision.collect {
+            synchronized(current.screen) {
+                val added = current.screen.historyLinesAdded
+                if (historyOffset > 0) {
+                    historyOffset = (historyOffset + (added - historyLinesAdded).coerceAtLeast(0))
+                        .coerceAtMost(current.screen.scrollbackSize.toLong()).toInt()
+                }
+                historyLinesAdded = added
+                showViewport()
+            }
+        }
     }
 
     LaunchedEffect(settings.blink) {
@@ -208,7 +241,7 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
                 session?.resize(wantCols, wantRows)
             }
 
-            Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().clipToBounds()) {
                 if (rowsData.isEmpty()) {
                     Text(
                         text = when {
@@ -225,25 +258,65 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
                     Column(Modifier.fillMaxSize().padding(horizontal = 2.dp)) {
                         rowsData.forEach { row ->
                             Text(
-                                text = buildRow(row, cursorOn, settings, scheme),
+                                text = buildRow(row, scheme),
                                 fontFamily = font.family,
                                 fontSize = fontSize.sp,
                                 lineHeight = (fontSize * 1.2f).sp,
                                 softWrap = false,
                                 maxLines = 1,
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth().height(cellHeight),
                             )
                         }
                     }
+                }
+                val cursorRow = rowsData.indexOfFirst { it.cursorCol >= 0 }
+                if (cursorOn && cursorRow >= 0) {
+                    val cursorCol = rowsData[cursorRow].cursorCol
+                    val cursorWidth = if (settings.cursorStyle == "bar") 2.dp else cellWidth
+                    val cursorHeight = if (settings.cursorStyle == "underline") 2.dp else cellHeight
+                    Box(
+                        Modifier.offset(
+                            x = 2.dp + cellWidth * cursorCol,
+                            y = cellHeight * cursorRow + if (settings.cursorStyle == "underline") cellHeight - 2.dp else 0.dp,
+                        ).size(cursorWidth, cursorHeight).background(scheme.cursor),
+                    )
                 }
                 // Transparent overlay receives the whole tap gesture above the rendered rows.
                 AndroidView(
                     factory = { context ->
                         TerminalInputView(context).also { inputHolder[0] = it }
                     },
-                    update = { view -> view.onBytes = { bytes -> send(bytes) } },
+                    update = { view ->
+                        view.onBytes = { bytes -> send(bytes) }
+                        view.onInput = { jumpToLive() }
+                        view.cellHeightPx = with(density) { cellHeight.toPx() }
+                        view.onScroll = { lines, x, y ->
+                            val target = session
+                            if (settings.scrollMode == "mouse") {
+                                jumpToLive()
+                                target?.scrollRemote(
+                                    lines,
+                                    ((x - with(density) { 2.dp.toPx() }) / with(density) { cellWidth.toPx() }).toInt(),
+                                    (y / with(density) { cellHeight.toPx() }).toInt(),
+                                )
+                            } else {
+                                historyOffset = (historyOffset + lines).coerceIn(0, target?.screen?.scrollbackSize ?: 0)
+                                showViewport()
+                            }
+                        }
+                    },
                     modifier = Modifier.fillMaxSize(),
                 )
+                if (historyOffset > 0) {
+                    Text(
+                        "история · $historyOffset",
+                        color = scheme.foreground.copy(alpha = 0.7f),
+                        fontSize = 10.sp,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                            .background(scheme.background.copy(alpha = 0.85f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                    )
+                }
             }
         }
 
@@ -265,6 +338,23 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         }
 
         Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("История", fontSize = 11.sp, color = scheme.foreground)
+            Switch(
+                checked = settings.scrollMode == "mouse",
+                onCheckedChange = {
+                    jumpToLive()
+                    app.store.updateTerminal(settings.copy(scrollMode = if (it) "mouse" else "history"))
+                },
+                modifier = Modifier.padding(horizontal = 8.dp),
+            )
+            Text("Мышь", fontSize = 11.sp, color = scheme.foreground)
+        }
+
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
@@ -274,7 +364,7 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         ) {
             TermKey("Esc", scheme) { send(byteArrayOf(27)) }
             TermKey("Tab", scheme) { send(byteArrayOf(9)) }
-            TermKey("Ctrl", scheme, active = ctrlArmed) { ctrlArmed = !ctrlArmed }
+            TermKey("Ctrl", scheme, active = ctrlArmed) { jumpToLive(); ctrlArmed = !ctrlArmed }
             TermKey("↑", scheme) { send(byteArrayOf(27, 91, 65)) }
             TermKey("↓", scheme) { send(byteArrayOf(27, 91, 66)) }
             TermKey("←", scheme) { send(byteArrayOf(27, 91, 68)) }
@@ -287,7 +377,7 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
             TermKey("~", scheme) { send("~".toByteArray()) }
             TermKey("Вставить", scheme) {
                 val text = clipboard.getText()?.text.orEmpty()
-                if (text.isNotEmpty()) session?.send(text)
+                if (text.isNotEmpty()) { jumpToLive(); session?.send(text) }
             }
             TermKey("⌨", scheme) { inputHolder[0]?.showKeyboard() }
         }
@@ -377,6 +467,9 @@ private fun TerminalSettingsSheet(
                 ChoiceChip("Блок", selected = settings.cursorStyle == "block") {
                     onChange(settings.copy(cursorStyle = "block"))
                 }
+                ChoiceChip("Черта", selected = settings.cursorStyle == "bar") {
+                    onChange(settings.copy(cursorStyle = "bar"))
+                }
                 ChoiceChip("Подчёркивание", selected = settings.cursorStyle == "underline") {
                     onChange(settings.copy(cursorStyle = "underline"))
                 }
@@ -445,11 +538,9 @@ private fun TermKey(
     }
 }
 
-/** Builds one styled row, with a cursor when it sits on this line. */
+/** Builds character styling; the cursor is drawn separately over the grid. */
 private fun buildRow(
     row: RowSnapshot,
-    cursorOn: Boolean,
-    settings: TerminalSettings,
     scheme: TermScheme,
 ): AnnotatedString {
     val text = row.text
@@ -474,22 +565,6 @@ private fun buildRow(
                 span.start,
                 end,
             )
-        }
-        if (row.cursorCol >= 0 && cursorOn) {
-            val at = row.cursorCol.coerceAtLeast(0)
-            if (at >= length) append(" ".repeat(at - length + 1))
-            when (settings.cursorStyle) {
-                "underline" -> addStyle(
-                    SpanStyle(color = scheme.cursor, textDecoration = TextDecoration.Underline),
-                    at,
-                    (at + 1).coerceAtMost(length),
-                )
-                else -> addStyle(
-                    SpanStyle(background = scheme.cursor, color = scheme.background),
-                    at,
-                    (at + 1).coerceAtMost(length),
-                )
-            }
         }
     }
 }

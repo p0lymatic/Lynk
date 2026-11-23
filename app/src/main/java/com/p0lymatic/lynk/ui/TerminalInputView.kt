@@ -5,6 +5,8 @@ import android.text.InputType
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
+import kotlin.math.abs
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -12,6 +14,15 @@ import android.view.inputmethod.InputMethodManager
 
 /** Transparent terminal touch target and text editor for hardware and software keyboards. */
 class TerminalInputView(context: Context) : View(context) {
+
+    var onScroll: ((lines: Int, x: Float, y: Float) -> Unit)? = null
+    var onInput: (() -> Unit)? = null
+    var cellHeightPx: Float = 1f
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downY = 0f
+    private var lastY = 0f
+    private var dragRemainder = 0f
+    private var dragging = false
 
     var onBytes: ((ByteArray) -> Unit)? = null
 
@@ -33,9 +44,37 @@ class TerminalInputView(context: Context) : View(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> requestFocus()
-            MotionEvent.ACTION_UP -> performClick()
-            MotionEvent.ACTION_CANCEL -> return true
+            MotionEvent.ACTION_DOWN -> {
+                requestFocus()
+                downY = event.y
+                lastY = event.y
+                dragRemainder = 0f
+                dragging = false
+                parent?.requestDisallowInterceptTouchEvent(true)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!dragging && abs(event.y - downY) > touchSlop) {
+                    dragging = true
+                    lastY = downY + if (event.y > downY) touchSlop else -touchSlop
+                }
+                if (dragging) {
+                    dragRemainder += lastY - event.y
+                    lastY = event.y
+                    val lines = (dragRemainder / cellHeightPx.coerceAtLeast(1f)).toInt()
+                    if (lines != 0) {
+                        dragRemainder -= lines * cellHeightPx.coerceAtLeast(1f)
+                        onScroll?.invoke(lines, event.x, event.y)
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                parent?.requestDisallowInterceptTouchEvent(false)
+                if (!dragging) performClick()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                dragging = false
+                parent?.requestDisallowInterceptTouchEvent(false)
+            }
         }
         return true
     }
@@ -96,6 +135,11 @@ class TerminalInputView(context: Context) : View(context) {
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
         return object : BaseInputConnection(this, true) {
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                onInput?.invoke()
+                return super.setComposingText(text, newCursorPosition)
+            }
+
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 // Replace the local composing buffer, then forward the committed text once.
                 editable?.clear()
@@ -147,6 +191,7 @@ class TerminalInputView(context: Context) : View(context) {
     }
 
     private fun handle(event: KeyEvent) {
+        onInput?.invoke()
         // Ctrl+letter → control code (Ctrl-C = 3, Ctrl-D = 4 …).
         if (event.isCtrlPressed) {
             val ch = event.getUnicodeChar(event.metaState and KeyEvent.META_CTRL_MASK.inv())

@@ -76,6 +76,12 @@ class VtScreen(cols: Int, rows: Int) {
     private val scrollback = ArrayDeque<Array<Cell>>()
     private var usingAlt = false
 
+    val scrollbackSize: Int @Synchronized get() = scrollback.size
+    internal var historyLinesAdded = 0L
+        private set
+    private val mouseModes = mutableSetOf<Int>()
+    val mouseReporting: Boolean @Synchronized get() = mouseModes.isNotEmpty()
+
     var cursorRow = 0
         private set
     var cursorCol = 0
@@ -168,6 +174,7 @@ class VtScreen(cols: Int, rows: Int) {
         main = newGrid(cols, rows)
         alt = newGrid(cols, rows)
         scrollback.clear()
+        mouseModes.clear()
         grid = main
         usingAlt = false
         cursorRow = 0
@@ -178,32 +185,43 @@ class VtScreen(cols: Int, rows: Int) {
     /** Rows currently on screen, top to bottom, with the cursor column marked. */
     @Synchronized
     fun snapshot(): List<RowSnapshot> {
-        val out = ArrayList<RowSnapshot>(rows)
-        for (r in 0 until rows) {
-            val cells = grid[r]
-            val text = StringBuilder(cols)
-            val spans = ArrayList<Span>(8)
-            var runStart = 0
-            var cur = cells[0]
-            for (c in 1 until cols) {
-                val cell = cells[c]
-                if (cell.fg != cur.fg || cell.bg != cur.bg || cell.bold != cur.bold ||
-                    cell.underline != cur.underline || cell.inverse != cur.inverse
-                ) {
-                    spans += Span(runStart, c, cur.fg, cur.bg, cur.bold, cur.underline, cur.inverse)
-                    runStart = c
-                    cur = cell
-                }
-            }
-            spans += Span(runStart, cols, cur.fg, cur.bg, cur.bold, cur.underline, cur.inverse)
-            for (c in 0 until cols) text.append(cells[c].ch)
-            out += RowSnapshot(
-                text = text.toString().trimEnd(),
-                spans = spans,
-                cursorCol = if (cursorVisible && r == cursorRow) cursorCol else -1,
-            )
+        return List(rows) { r ->
+            rowSnapshot(grid[r], if (cursorVisible && r == cursorRow) cursorCol else -1)
         }
-        return out
+    }
+
+    /** Positive offsets inspect primary-buffer history, even while the alternate screen is active. */
+    @Synchronized
+    fun viewport(offset: Int): List<RowSnapshot> {
+        val back = offset.coerceIn(0, scrollback.size)
+        if (back == 0) return snapshot()
+        val start = scrollback.size - back
+        return List(rows) { r ->
+            val index = start + r
+            rowSnapshot(if (index < scrollback.size) scrollback[index] else main[index - scrollback.size], -1)
+        }
+    }
+
+    private fun rowSnapshot(row: Array<Cell>, cursor: Int): RowSnapshot {
+        // History rows can have a different width after a resize. Pad or crop to the current grid.
+        val cells = if (row.size == cols) row else Array(cols) { c -> row.getOrNull(c) ?: Cell() }
+        val text = StringBuilder(cols)
+        val spans = ArrayList<Span>(8)
+        var runStart = 0
+        var cur = cells[0]
+        for (c in 1 until cols) {
+            val cell = cells[c]
+            if (cell.fg != cur.fg || cell.bg != cur.bg || cell.bold != cur.bold ||
+                cell.underline != cur.underline || cell.inverse != cur.inverse
+            ) {
+                spans += Span(runStart, c, cur.fg, cur.bg, cur.bold, cur.underline, cur.inverse)
+                runStart = c
+                cur = cell
+            }
+        }
+        spans += Span(runStart, cols, cur.fg, cur.bg, cur.bold, cur.underline, cur.inverse)
+        for (cell in cells) text.append(cell.ch)
+        return RowSnapshot(text.toString().trimEnd(), spans, cursor)
     }
 
     // ---- parser --------------------------------------------------------------
@@ -302,6 +320,7 @@ class VtScreen(cols: Int, rows: Int) {
             val top = grid[scrollTop]
             if (!usingAlt && scrollTop == 0) {
                 scrollback.addLast(copyRow(top))
+                historyLinesAdded++
                 while (scrollback.size > MAX_SCROLLBACK) scrollback.removeFirst()
             }
             for (r in scrollTop until scrollBottom) grid[r] = grid[r + 1]
@@ -381,7 +400,8 @@ class VtScreen(cols: Int, rows: Int) {
                 7 -> wrapEnabled = on
                 25 -> cursorVisible = on
                 47, 1047, 1049 -> switchAlt(on)
-                1000, 1002, 1003, 1004, 1006, 2004 -> Unit // mouse/focus/paste: ignored
+                1000, 1002, 1003 -> if (on) { mouseModes.add(mode) } else { mouseModes.remove(mode) }
+                1004, 1006, 2004 -> Unit // focus/encoding/paste: ignored
                 else -> Unit
             }
         }

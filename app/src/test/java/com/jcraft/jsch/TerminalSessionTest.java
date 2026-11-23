@@ -329,4 +329,46 @@ public class TerminalSessionTest {
         assertTrue(notified.await(2, TimeUnit.SECONDS));
     }
 
+    @Test public void remoteScrollFallsBackToArrows() throws Exception {
+        Shell shell = new Shell();
+        try (TerminalSession terminal = terminal(shell)) {
+            terminal.scrollRemote(2, 3, 4);
+            terminal.scrollRemote(-1, 3, 4);
+            terminal.scrollRemote(0, 3, 4);
+            await(() -> shell.sent.size() == 9);
+            assertEquals("\u001b[A\u001b[A\u001b[B", shell.sent.toString("UTF-8"));
+        }
+    }
+
+    @Test public void remoteScrollUsesSgrWheelWhenMouseTrackingEnabled() throws Exception {
+        Shell shell = new Shell();
+        try (TerminalSession terminal = terminal(shell)) {
+            await(() -> terminal.getRevision().getValue() > 0);
+            shell.receive("\u001b[?1000h");
+            await(() -> terminal.getScreen().getMouseReporting());
+            terminal.scrollRemote(2, 3, 4);
+            terminal.scrollRemote(-1, 3, 4);
+            terminal.scrollRemote(1, -5, 999);
+            String expected = "\u001b[<64;4;5M\u001b[<64;4;5M\u001b[<65;4;5M\u001b[<64;1;24M";
+            await(() -> shell.sent.size() == expected.length());
+            assertEquals(expected, shell.sent.toString("UTF-8"));
+            shell.receive("\u001b[?1000l");
+            await(() -> !terminal.getScreen().getMouseReporting());
+            terminal.scrollRemote(-1, 0, 0);
+            await(() -> shell.sent.size() == expected.length() + 3);
+            assertEquals(expected + "\u001b[B", shell.sent.toString("UTF-8"));
+        }
+    }
+
+    @Test public void dsrDoesNotCountAsUserInput() throws Exception {
+        Shell shell = new Shell();
+        try (TerminalSession terminal = terminal(shell)) {
+            shell.receive("\u001b[5n");
+            await(() -> shell.sent.size() == 4);
+            assertEquals(0L, terminal.getInputRevision().getValue().longValue());
+            terminal.send("x");
+            assertEquals(1L, terminal.getInputRevision().getValue().longValue());
+        }
+    }
+
 }

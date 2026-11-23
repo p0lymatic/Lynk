@@ -73,13 +73,16 @@ class TerminalSession(
             output = ch.outputStream
             ch.connect(CONNECT_TIMEOUT_MS)
             // DSR replies share the FIFO with user input.
-            screen.onResponse = { reply -> sendBytes(reply.toByteArray(Charsets.UTF_8)) }
+            screen.onResponse = { reply -> enqueueBytes(reply.toByteArray(Charsets.UTF_8)) }
             _status.value = Status.CONNECTED
             startPump(input)
         } catch (t: Throwable) {
             fail(t)
         }
     }
+
+    private val _inputRevision = MutableStateFlow(0L)
+    val inputRevision: StateFlow<Long> = _inputRevision.asStateFlow()
 
     // ---- input ---------------------------------------------------------------
 
@@ -89,6 +92,29 @@ class TerminalSession(
     }
 
     fun sendBytes(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        synchronized(queueLock) { _inputRevision.value++ }
+        enqueueBytes(bytes)
+    }
+
+    /** Positive lines scroll up; negative lines scroll down. Coordinates are zero based. */
+    fun scrollRemote(lines: Int, col: Int, row: Int) {
+        if (lines == 0) return
+        val sequence = synchronized(screen) {
+            if (screen.mouseReporting) {
+                val button = if (lines > 0) 64 else 65
+                "\u001b[<$button;${col.coerceIn(0, screen.cols - 1) + 1};${row.coerceIn(0, screen.rows - 1) + 1}M"
+            } else if (lines > 0) "\u001b[A" else "\u001b[B"
+        }
+        val bytes = sequence.toByteArray(Charsets.UTF_8)
+        var remaining = kotlin.math.abs(lines.toLong())
+        while (remaining > 0 && !closed.get()) {
+            sendBytes(bytes)
+            remaining--
+        }
+    }
+
+    private fun enqueueBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         synchronized(queueLock) {
             if (closed.get()) return

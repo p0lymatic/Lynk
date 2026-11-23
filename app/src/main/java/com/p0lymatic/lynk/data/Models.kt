@@ -109,6 +109,8 @@ data class TerminalSettings(
     /** block, underline or bar */
     val cursorStyle: String = "block",
     val blink: Boolean = true,
+    /** history or mouse */
+    val scrollMode: String = "history",
 )
 
 @Serializable

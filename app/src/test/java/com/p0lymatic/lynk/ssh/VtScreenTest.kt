@@ -105,4 +105,63 @@ class VtScreenTest {
         writer.join(5_000)
         assertTrue(vt.snapshot().isNotEmpty())
     }
+    @Test
+    fun `viewport exposes clamped history with styles and hidden cursor`() {
+        val vt = screen()
+        repeat(100) { vt.feed("\u001b[31mline $it\u001b[0m\r\n") }
+        assertTrue(vt.scrollbackSize > 0)
+        assertEquals(96, vt.scrollbackSize)
+        assertEquals(vt.snapshot(), vt.viewport(0))
+        assertEquals(vt.snapshot(), vt.viewport(-10))
+        val older = vt.viewport(10)
+        assertEquals("line 86", older.first().text)
+        assertTrue(older.all { it.cursorCol == -1 })
+        assertTrue(older.first().spans.any { it.fg == 1 })
+        assertEquals("line 0", vt.viewport(Int.MAX_VALUE).first().text)
+        assertEquals(vt.viewport(vt.scrollbackSize), vt.viewport(Int.MAX_VALUE))
+    }
+
+    @Test
+    fun `alternate output cannot change primary history viewport`() {
+        val vt = screen()
+        repeat(100) { vt.feed("main $it\r\n") }
+        val history = vt.viewport(1)
+        val size = vt.scrollbackSize
+        vt.feed("\u001b[?1049h\u001b[H")
+        repeat(100) { vt.feed("alt $it\r\n") }
+        assertEquals(size, vt.scrollbackSize)
+        assertEquals(history, vt.viewport(1))
+        assertEquals(vt.snapshot(), vt.viewport(0))
+        vt.feed("\u001b[?1049l")
+        assertEquals(history, vt.viewport(1))
+    }
+
+    @Test
+    fun `history is capped and survives narrower and wider resizes`() {
+        val vt = screen(cols = 12)
+        repeat(VtScreen.MAX_SCROLLBACK + 20) { vt.feed("line $it\r\n") }
+        assertEquals(VtScreen.MAX_SCROLLBACK, vt.scrollbackSize)
+        vt.resize(4, 5)
+        assertEquals("line", vt.viewport(10).first().text)
+        assertTrue(vt.viewport(10).first().spans.all { it.end <= 4 })
+        vt.resize(24, 5)
+        assertTrue(vt.viewport(10).first().text.startsWith("line "))
+        assertEquals(24, vt.viewport(10).first().spans.last().end)
+    }
+
+    @Test
+    fun `mouse tracking modes can be enabled disabled and reset`() {
+        val vt = screen()
+        for (mode in listOf(1000, 1002, 1003)) {
+            vt.feed("\u001b[?$mode" + "h")
+            assertTrue(vt.mouseReporting)
+            vt.feed("\u001b[?$mode" + "l")
+            assertEquals(false, vt.mouseReporting)
+        }
+        vt.feed("\u001b[?1000;1002h\u001b[?1000l")
+        assertTrue(vt.mouseReporting)
+        vt.feed("\u001bc")
+        assertEquals(false, vt.mouseReporting)
+    }
+
 }
