@@ -96,6 +96,17 @@ jobs:
           path: app/build/test-results/testDebugUnitTest/*.xml
           if-no-files-found: error
 
+      # Аккуратные имена файлов в релизе: lynk-0.3.0-release.apk вместо app-release.apk.
+      - name: Name APKs
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          while IFS= read -r apk; do
+            kind=$(basename "$(dirname "$apk")")
+            cp "$apk" "dist/lynk-${GITHUB_REF_NAME#v}-${kind}.apk"
+          done < <(find app/build/outputs/apk -type f -name '*.apk')
+
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -103,6 +114,6 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          mapfile -t apks < <(find app/build/outputs/apk -type f -name '*.apk' | sort)
+          mapfile -t apks < <(find dist -type f -name '*.apk' | sort)
           gh release create "$TAG" "${apks[@]}" --title "$TAG" --notes "сборка CI" \
             || gh release upload "$TAG" "${apks[@]}" --clobber

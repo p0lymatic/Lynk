@@ -134,6 +134,12 @@ jobs:
               exit 1
               ;;
           esac
+          # Аккуратные имена: lynk-0.3.0-release.apk вместо app-release.apk.
+          mkdir -p dist
+          while IFS= read -r apk; do
+            kind=$(basename "$(dirname "$apk")")
+            cp "$apk" "dist/lynk-${TAG#v}-${kind}.apk"
+          done < <(find app/build/outputs/apk -type f -name '*.apk')
           # Перезапуск по тому же тегу не должен падать на уже загруженных ассетах.
           existing=$(curl -sS -f -H "$auth" "$api/${id}/assets" \
             | python3 -c 'import json,sys;print("\n".join(a["name"] for a in json.load(sys.stdin)))')
@@ -150,4 +156,4 @@ jobs:
               201) ;;
               *) echo "не удалось загрузить $name: HTTP $status" >&2; exit 1 ;;
             esac
-          done < <(find app/build/outputs/apk -type f -name '*.apk' | sort)
+          done < <(find dist -type f -name '*.apk' | sort)
