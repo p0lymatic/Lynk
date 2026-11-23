@@ -64,6 +64,9 @@ class ConnectionManager(private val context: Context, private val store: Store) 
     val terminals: StateFlow<Int> = _terminals.asStateFlow()
 
     private val sessions = HashMap<String, Session>()
+    private val ioExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "lynk-ssh-io").apply { isDaemon = true }
+    }
     private val mutex = Mutex()
 
     /** Called whenever something connects or disconnects, so the foreground service can react. */
@@ -165,18 +168,22 @@ class ConnectionManager(private val context: Context, private val store: Store) 
         File(keysDir(), "$serverId.pem").delete()
     }
 
-    suspend fun disconnect(serverId: String) = mutex.withLock {
-        _forwards.value.values.filter { it.serverId == serverId }.forEach { closeForwardInternal(it) }
-        sessions.remove(serverId)?.let { runCatching { it.disconnect() } }
-        setState(serverId, ConnState(Phase.IDLE))
+    suspend fun disconnect(serverId: String) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            _forwards.value.values.filter { it.serverId == serverId }.forEach { closeForwardInternal(it) }
+            sessions.remove(serverId)?.let { runCatching { it.disconnect() } }
+            setState(serverId, ConnState(Phase.IDLE))
+        }
     }
 
-    suspend fun disconnectAll() = mutex.withLock {
-        _forwards.value.values.toList().forEach { closeForwardInternal(it) }
-        sessions.values.forEach { runCatching { it.disconnect() } }
-        sessions.clear()
-        _states.value = _states.value.mapValues { ConnState(Phase.IDLE) }
-        onActivityChanged?.invoke()
+    suspend fun disconnectAll() = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            _forwards.value.values.toList().forEach { closeForwardInternal(it) }
+            sessions.values.forEach { runCatching { it.disconnect() } }
+            sessions.clear()
+            _states.value = _states.value.mapValues { ConnState(Phase.IDLE) }
+            onActivityChanged?.invoke()
+        }
     }
 
     fun trustHostKey(entry: HostKeyEntry) = store.trustHostKey(entry)
@@ -226,7 +233,10 @@ class ConnectionManager(private val context: Context, private val store: Store) 
     }
 
     private fun closeForwardInternal(forward: LocalForward) {
-        runCatching { sessions[forward.serverId]?.delPortForwardingL(forward.localPort) }
+        // delPortForwardingL talks to the server: never do it on the caller's thread (often Main).
+        sessions[forward.serverId]?.let { session ->
+            ioExecutor.execute { runCatching { session.delPortForwardingL(forward.localPort) } }
+        }
         _forwards.value = _forwards.value - forward.id
     }
 
@@ -241,18 +251,21 @@ class ConnectionManager(private val context: Context, private val store: Store) 
 
     // ---- terminals -----------------------------------------------------------
 
-    suspend fun openTerminal(server: ServerConfig, cols: Int, rows: Int): TerminalSession {
-        val session = ensureConnected(server)
-        _terminals.value = _terminals.value + 1
-        onActivityChanged?.invoke()
-        return try {
-            TerminalSession(session, cols, rows) { _terminals.value = (_terminals.value - 1).coerceAtLeast(0) }
-        } catch (t: Throwable) {
-            _terminals.value = (_terminals.value - 1).coerceAtLeast(0)
+    suspend fun openTerminal(server: ServerConfig, cols: Int, rows: Int): TerminalSession =
+        withContext(Dispatchers.IO) {
+            val session = ensureConnected(server)
+            _terminals.value = _terminals.value + 1
             onActivityChanged?.invoke()
-            throw t
+            try {
+                TerminalSession(session, cols, rows) {
+                    _terminals.value = (_terminals.value - 1).coerceAtLeast(0)
+                }
+            } catch (t: Throwable) {
+                _terminals.value = (_terminals.value - 1).coerceAtLeast(0)
+                onActivityChanged?.invoke()
+                throw t
+            }
         }
-    }
 
     /**
      * Runs one non-interactive command over the shared session and returns stdout.
