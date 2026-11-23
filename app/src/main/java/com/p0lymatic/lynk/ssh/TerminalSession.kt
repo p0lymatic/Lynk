@@ -6,6 +6,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.Closeable
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -43,6 +45,9 @@ class TerminalSession(
     private var channel: ChannelShell? = null
 
     @Volatile
+    private var output: OutputStream? = null
+
+    @Volatile
     private var reader: Thread? = null
 
     @Volatile
@@ -54,15 +59,19 @@ class TerminalSession(
             ch.setPtyType("xterm-256color")
             ch.setPtySize(screen.cols, screen.rows, 0, 0)
             ch.setEnv("TERM", "xterm-256color")
-            ch.connect(CONNECT_TIMEOUT_MS)
             channel = ch
+            // JSch installs the receive pipe here; output arriving before this is discarded.
+            val input = ch.inputStream
+            output = ch.outputStream
+            ch.connect(CONNECT_TIMEOUT_MS)
             // Answers to DSR / device-status queries go straight back to the host.
             screen.onResponse = { reply -> sendBytes(reply.toByteArray(Charsets.UTF_8)) }
             _status.value = Status.CONNECTED
-            startPump(ch)
+            startPump(input)
         } catch (t: Throwable) {
             runCatching { channel?.disconnect() }
             channel = null
+            output = null
             _error.value = ConnectionManager.describe(t)
             _status.value = Status.ERROR
         }
@@ -77,11 +86,12 @@ class TerminalSession(
 
     fun sendBytes(bytes: ByteArray) {
         if (bytes.isEmpty() || closed.get()) return
-        val ch = channel ?: return
         synchronized(writeLock) {
+            val stream = output ?: return
             runCatching {
-                ch.outputStream.write(bytes)
-                ch.outputStream.flush()
+                // getOutputStream() creates a new buffered stream on every call.
+                stream.write(bytes)
+                stream.flush()
             }.onFailure { fail(it) }
         }
     }
@@ -109,6 +119,7 @@ class TerminalSession(
         val c = cols.coerceAtLeast(1)
         val r = rows.coerceAtLeast(1)
         screen.resize(c, r)
+        dirty.set(true)
         publish()
         val ch = channel ?: return
         runCatching { ch.setPtySize(c, r, 0, 0) }
@@ -130,6 +141,7 @@ class TerminalSession(
         val f = flusher
         if (f != null && f !== Thread.currentThread()) runCatching { f.join(200) }
         channel = null
+        output = null
         publishNow()
         _status.value = Status.CLOSED
         runCatching { onClosed() }
@@ -137,11 +149,10 @@ class TerminalSession(
 
     // ---- pump ----------------------------------------------------------------
 
-    private fun startPump(ch: ChannelShell) {
+    private fun startPump(input: InputStream) {
         val readThread = Thread({
             val buf = ByteArray(8192)
             try {
-                val input = ch.inputStream
                 while (!closed.get()) {
                     val n = input.read(buf)
                     if (n < 0) break
@@ -150,12 +161,13 @@ class TerminalSession(
                         dirty.set(true)
                     }
                 }
-            } catch (_: Throwable) {
-                // Channel torn down locally or by the peer; nothing left to read.
+            } catch (t: Throwable) {
+                // Local close is expected; unexpected read failures must reach the UI.
+                fail(t)
             } finally {
                 publishNow()
                 flushStop.set(true)
-                if (!closed.get()) _status.value = Status.CLOSED
+                if (!closed.get() && _status.value != Status.ERROR) _status.value = Status.CLOSED
             }
         }, "lynk-terminal-read")
         readThread.isDaemon = true

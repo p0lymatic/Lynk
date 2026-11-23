@@ -63,7 +63,7 @@ import kotlinx.coroutines.launch
 /**
  * Terminal screen: a real grid renderer on top of [com.p0lymatic.lynk.ssh.VtScreen].
  *
- * The keyboard is owned by a full-size [TerminalInputView] sitting behind the text, so a tap
+ * The keyboard is owned by a full-size [TerminalInputView] sitting above the text, so a tap
  * anywhere focuses it and opens the IME. Font, size, palette and cursor are configurable.
  */
 @Composable
@@ -78,7 +78,6 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
     var session by remember { mutableStateOf<TerminalSession?>(null) }
     var status by remember { mutableStateOf(TerminalSession.Status.CONNECTING) }
     var error by remember { mutableStateOf<String?>(null) }
-    var revision by remember { mutableStateOf(0L) }
     var rowsData by remember { mutableStateOf<List<RowSnapshot>>(emptyList()) }
     var ctrlArmed by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
@@ -115,6 +114,7 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         }
         session?.close()
         session = null
+        rowsData = emptyList()
         error = null
         status = TerminalSession.Status.CONNECTING
         try {
@@ -133,11 +133,8 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         val current = session ?: return@LaunchedEffect
         launch { current.status.collect { status = it } }
         launch { current.error.collect { error = it } }
-        current.revision.collect { revision = it }
-    }
-
-    LaunchedEffect(revision) {
-        rowsData = session?.screen?.snapshot() ?: emptyList()
+        // Snapshot this session even when its initial revision equals the previous one's.
+        current.revision.collect { rowsData = current.screen.snapshot() }
     }
 
     LaunchedEffect(settings.blink) {
@@ -203,26 +200,15 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
             val wantCols = (maxWidth / cellWidth).toInt().coerceIn(20, 400)
             val wantRows = (maxHeight / cellHeight).toInt().coerceIn(4, 200)
 
-            LaunchedEffect(wantCols, wantRows) {
+            LaunchedEffect(session, wantCols, wantRows) {
                 if (wantCols != cols || wantRows != rows) {
                     cols = wantCols
                     rows = wantRows
-                    session?.resize(wantCols, wantRows)
                 }
+                session?.resize(wantCols, wantRows)
             }
 
             Box(Modifier.fillMaxSize()) {
-                // Behind the text: takes taps, owns the IME.
-                AndroidView(
-                    factory = { context ->
-                        TerminalInputView(context).also { view ->
-                            view.onBytes = { bytes -> send(bytes) }
-                            inputHolder[0] = view
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-
                 if (rowsData.isEmpty()) {
                     Text(
                         text = when {
@@ -250,6 +236,14 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
                         }
                     }
                 }
+                // Transparent overlay receives the whole tap gesture above the rendered rows.
+                AndroidView(
+                    factory = { context ->
+                        TerminalInputView(context).also { inputHolder[0] = it }
+                    },
+                    update = { view -> view.onBytes = { bytes -> send(bytes) } },
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
 

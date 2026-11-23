@@ -10,63 +10,128 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 
-/**
- * Invisible, full-size view that owns the keyboard for the terminal.
- *
- * Full-size on purpose: a 1 dp view cannot reliably take focus, and the IME refuses to open for
- * something it cannot see. Terminals also want finished text, not IME composition — with
- * [InputType.TYPE_NULL] the keyboard commits characters as they are typed.
- */
+/** Transparent terminal touch target and text editor for hardware and software keyboards. */
 class TerminalInputView(context: Context) : View(context) {
 
     var onBytes: ((ByteArray) -> Unit)? = null
 
     private val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
 
-    init {
-        isFocusable = true
-        isFocusableInTouchMode = true
-        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-        setOnTouchListener { view, event ->
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                if (!view.isFocused) view.requestFocus()
-                showKeyboard()
-            }
-            false
+    private var keyboardRequested = false
+    private val showIme = Runnable {
+        if (keyboardRequested && isAttachedToWindow && hasWindowFocus() && isFocused) {
+            keyboardRequested = !imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
         }
     }
 
+    init {
+        isFocusable = true
+        isFocusableInTouchMode = true
+        isClickable = true
+        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> requestFocus()
+            MotionEvent.ACTION_UP -> performClick()
+            MotionEvent.ACTION_CANCEL -> return true
+        }
+        return true
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        showKeyboard()
+        return true
+    }
+
     fun showKeyboard() {
-        if (!isFocused) requestFocus()
-        post { runCatching { imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) } }
+        keyboardRequested = true
+        requestFocus()
+        scheduleKeyboard()
+    }
+
+    private fun scheduleKeyboard() {
+        removeCallbacks(showIme)
+        if (isAttachedToWindow && hasWindowFocus() && isFocused) post(showIme)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (keyboardRequested) {
+            requestFocus()
+            scheduleKeyboard()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (hasWindowFocus && keyboardRequested) {
+            requestFocus()
+            scheduleKeyboard()
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(showIme)
+        super.onDetachedFromWindow()
     }
 
     fun hideKeyboard() {
-        runCatching { imm.hideSoftInputFromWindow(windowToken, 0) }
+        keyboardRequested = false
+        removeCallbacks(showIme)
+        imm.hideSoftInputFromWindow(windowToken, 0)
     }
 
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        outAttrs.inputType = InputType.TYPE_NULL
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
+            InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
         outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or
+            EditorInfo.IME_FLAG_NO_ENTER_ACTION or
             EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI
-        return object : BaseInputConnection(this, false) {
+        outAttrs.initialSelStart = 0
+        outAttrs.initialSelEnd = 0
+        return object : BaseInputConnection(this, true) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                // Replace the local composing buffer, then forward the committed text once.
+                editable?.clear()
+                editable?.let { removeComposingSpans(it) }
                 val value = text?.toString().orEmpty()
                 if (value.isNotEmpty()) emit(value)
                 return true
             }
 
-            /** Composition is swallowed: the terminal only sees committed text. */
-            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean = true
+            // BaseInputConnection keeps preedit text locally; it must not reach the shell yet.
+            override fun finishComposingText(): Boolean {
+                val value = editable?.toString().orEmpty()
+                super.finishComposingText()
+                editable?.clear()
+                if (value.isNotEmpty()) emit(value)
+                return true
+            }
 
-            override fun finishComposingText(): Boolean = true
+            override fun performEditorAction(actionCode: Int): Boolean {
+                emit("\r")
+                return true
+            }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                if (!editable.isNullOrEmpty()) {
+                    return super.deleteSurroundingText(beforeLength, afterLength)
+                }
                 repeat(beforeLength.coerceIn(0, 64)) { emit("\u007f") }
                 return true
+            }
+
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+                if (!editable.isNullOrEmpty()) {
+                    return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+                }
+                return deleteSurroundingText(beforeLength, afterLength)
             }
 
             override fun sendKeyEvent(event: KeyEvent): Boolean {
@@ -114,6 +179,6 @@ class TerminalInputView(context: Context) : View(context) {
 
     private fun emit(text: String) {
         if (text.isEmpty()) return
-        onBytes?.invoke(text.toByteArray(Charsets.UTF_8))
+        onBytes?.invoke(text.replace("\n", "\r").toByteArray(Charsets.UTF_8))
     }
 }
