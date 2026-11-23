@@ -13,6 +13,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.p0lymatic.lynk.R
+import com.p0lymatic.lynk.util.plural
 
 /**
  * Keeps the process alive while at least one SSH session, forward or terminal is in use:
@@ -30,8 +31,9 @@ class LynkService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         active = intent?.getIntExtra(EXTRA_ACTIVE, active) ?: active
         if (active <= 0) {
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
             stopSelf()
-            return START_NOT_STICKY
+            return START_STICKY
         }
         ensureChannel(this)
         val notification = buildNotification(active)
@@ -103,11 +105,8 @@ class LynkService : Service() {
             manager.createNotificationChannel(channel)
         }
 
-        private fun connectionText(count: Int): String = when {
-            count <= 0 -> "нет соединений"
-            count % 10 == 1 && count % 100 != 11 -> "$count соединение"
-            count % 10 in 2..4 && count % 100 !in 12..14 -> "$count соединения"
-            else -> "$count соединений"
-        }
+        private fun connectionText(count: Int): String =
+            if (count <= 0) "нет активных соединений"
+            else "$count ${plural(count, "соединение", "соединения", "соединений")}"
     }
 }
