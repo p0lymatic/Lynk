@@ -80,7 +80,7 @@ fun BrowserScreen(
     var loadError by remember { mutableStateOf<String?>(null) }
     var progress by remember { mutableStateOf(0) }
     var pageTitle by remember { mutableStateOf("") }
-    var webView by remember { mutableStateOf<WebView?>(null) }
+    val webViewHolder = remember { arrayOfNulls<WebView>(1) }
     var capturedIcon by remember { mutableStateOf<Bitmap?>(null) }
     var sslBypassed by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
@@ -126,8 +126,13 @@ fun BrowserScreen(
     val url = forward?.let { "${scheme.lowercase()}://127.0.0.1:${it.localPort}${normalizePath(path)}" }
 
     BackHandler {
-        val wv = webView
+        val wv = webViewHolder[0]
         if (wv != null && wv.canGoBack()) wv.goBack() else nav.pop()
+    }
+
+    // Load whenever the tunnel address changes (first open or a manual retry).
+    LaunchedEffect(url) {
+        url?.let { address -> webViewHolder[0]?.loadUrl(address) }
     }
 
     Column(Modifier.fillMaxSize().background(LynkColors.bg)) {
@@ -254,12 +259,8 @@ fun BrowserScreen(
                                     }
                                 }
                             }
-                            loadUrl(url)
-                            webView = this
+                            webViewHolder[0] = this
                         }
-                    },
-                    update = { view ->
-                        if (view.url != url) view.loadUrl(url)
                     },
                 )
             }

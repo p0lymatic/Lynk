@@ -42,9 +42,9 @@ class StoreHostKeyRepository(private val store: Store) : HostKeyRepository {
 
     override fun getKnownHostsRepositoryID(): String = "lynk"
 
-    override fun getHostKey(): Array<HostKey>? = null
+    override fun getHostKey(): Array<HostKey> = emptyArray()
 
-    override fun getHostKey(host: String?, type: String?): Array<HostKey>? = null
+    override fun getHostKey(host: String?, type: String?): Array<HostKey> = emptyArray()
 
     override fun add(key: HostKey, ui: UserInfo?) {
         // JSch only calls this when a KnownHosts UI accepts a key; Lynk asks the user itself and
