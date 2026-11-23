@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -201,12 +202,14 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
             },
             onBack = { nav.pop() },
             actions = {
-                TextButton(onClick = { fontSizeStep(app, settings, -1f) }) {
-                    Text("A−", color = scheme.foreground.copy(alpha = 0.7f), fontSize = 12.sp, fontFamily = Mono)
-                }
-                TextButton(onClick = { fontSizeStep(app, settings, +1f) }) {
-                    Text("A+", color = scheme.foreground.copy(alpha = 0.7f), fontSize = 12.sp, fontFamily = Mono)
-                }
+                ScrollModeToggle(
+                    mode = settings.scrollMode,
+                    scheme = scheme,
+                    onChange = { mode ->
+                        jumpToLive()
+                        app.store.updateTerminal(settings.copy(scrollMode = mode))
+                    },
+                )
                 IconButton(onClick = { showSettings = true }, modifier = Modifier.size(38.dp)) {
                     Icon(
                         imageVector = Icons.Filled.Settings,
@@ -335,23 +338,6 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
                     Text("Повторить", color = scheme.foreground, fontSize = 12.sp)
                 }
             }
-        }
-
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("История", fontSize = 11.sp, color = scheme.foreground)
-            Switch(
-                checked = settings.scrollMode == "mouse",
-                onCheckedChange = {
-                    jumpToLive()
-                    app.store.updateTerminal(settings.copy(scrollMode = if (it) "mouse" else "history"))
-                },
-                modifier = Modifier.padding(horizontal = 8.dp),
-            )
-            Text("Мышь", fontSize = 11.sp, color = scheme.foreground)
         }
 
         Row(
@@ -508,6 +494,43 @@ private fun ChoiceChip(
             fontSize = 12.sp,
             fontFamily = mono ?: Mono,
             color = if (selected) LynkColors.text else LynkColors.textDim,
+            maxLines = 1,
+        )
+    }
+}
+
+/** Compact segmented switch in the toolbar: История | Мышь. */
+@Composable
+private fun ScrollModeToggle(mode: String, scheme: TermScheme, onChange: (String) -> Unit) {
+    Row(
+        modifier = Modifier
+            .height(28.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(scheme.foreground.copy(alpha = 0.08f))
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ModeChip("История", mode != "mouse", scheme) { onChange("history") }
+        ModeChip("Мышь", mode == "mouse", scheme) { onChange("mouse") }
+    }
+}
+
+@Composable
+private fun ModeChip(label: String, selected: Boolean, scheme: TermScheme, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(5.dp))
+            .background(if (selected) scheme.foreground.copy(alpha = 0.20f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            fontSize = 10.5.sp,
+            fontFamily = Mono,
+            color = if (selected) scheme.foreground else scheme.foreground.copy(alpha = 0.55f),
             maxLines = 1,
         )
     }
