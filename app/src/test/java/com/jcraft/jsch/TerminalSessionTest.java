@@ -8,6 +8,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.function.BooleanSupplier;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import kotlin.Unit;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -75,6 +79,7 @@ public class TerminalSessionTest {
             terminal.send("echo Привет\n");
             terminal.sendBytes(new byte[] {3});
             terminal.sendKey(TerminalSession.KEY_UP);
+            await(() -> shell.sent.size() == "echo Привет\r\u0003\u001b[A".getBytes(StandardCharsets.UTF_8).length);
             assertEquals("echo Привет\r\u0003\u001b[A", shell.sent.toString("UTF-8"));
             assertEquals(1, shell.outputStreams);
         }
@@ -118,4 +123,210 @@ public class TerminalSessionTest {
             assertTrue(terminal.getScreen().snapshot().get(1).getText().contains("final output"));
         }
     }
+
+    /** A stalled network must not stall the UI, resize, or disposal. */
+    @Test public void queuesInputDsrResizeAndCloseOnOneWorker() throws Exception {
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch returned = new CountDownLatch(1);
+        CountDownLatch disconnected = new CountDownLatch(1);
+        AtomicReference<Thread> writeThread = new AtomicReference<>();
+        AtomicReference<Thread> resizeThread = new AtomicReference<>();
+        AtomicReference<Thread> closeThread = new AtomicReference<>();
+        Shell shell = new Shell() {
+            @Override public OutputStream getOutputStream() {
+                outputStreams++;
+                return new OutputStream() {
+                    @Override public void write(int value) throws IOException {
+                        writeThread.set(Thread.currentThread());
+                        writing.countDown();
+                        try {
+                            if (!release.await(3, TimeUnit.SECONDS)) throw new IOException("write blocked");
+                        } catch (InterruptedException e) { throw new IOException(e); }
+                        sent.write(value);
+                    }
+                };
+            }
+            @Override public void setPtySize(int cols, int rows, int width, int height) {
+                // The initial PTY configuration happens before connect, on the IO constructor path.
+                if (cols == 42) resizeThread.set(Thread.currentThread());
+            }
+            @Override public void disconnect() {
+                closeThread.set(Thread.currentThread());
+                super.disconnect();
+                disconnected.countDown();
+            }
+        };
+        TerminalSession terminal = terminal(shell);
+        Thread caller = new Thread(() -> {
+            terminal.sendBytes(new byte[] {'A'});
+            returned.countDown();
+        }, "test-ui");
+        try {
+            caller.start();
+            assertTrue("sendBytes blocked its caller", returned.await(1, TimeUnit.SECONDS));
+            assertTrue(writing.await(1, TimeUnit.SECONDS));
+            assertNotSame(caller, writeThread.get());
+
+            // Feed on the actual reader; its DSR reply must queue behind A and before B.
+            await(() -> terminal.getRevision().getValue() > 0);
+            long before = terminal.getRevision().getValue();
+            shell.receive("\u001b[5n");
+            await(() -> terminal.getRevision().getValue() > before);
+            byte[] bytes = new byte[] {'B'};
+            terminal.sendBytes(bytes);
+            bytes[0] = 'X'; // queued input must be owned by the session
+            terminal.resize(42, 10);
+            terminal.close();
+            terminal.close();
+            terminal.send("ignored after close");
+            assertNull("resize ran before queued input", resizeThread.get());
+            assertNull("close ran before queued input", closeThread.get());
+        } finally {
+            release.countDown();
+            terminal.close();
+            caller.join(2000);
+        }
+        assertTrue(disconnected.await(2, TimeUnit.SECONDS));
+        await(() -> terminal.getStatus().getValue() == TerminalSession.Status.CLOSED);
+        assertEquals("A\u001b[0nB", shell.sent.toString("UTF-8"));
+        assertSame(writeThread.get(), resizeThread.get());
+        assertSame(writeThread.get(), closeThread.get());
+        assertEquals(1, shell.outputStreams);
+        assertNull(terminal.getError().getValue());
+    }
+
+    @Test public void reportsWriterFailureAndClosesOnce() throws Exception {
+        AtomicInteger closed = new AtomicInteger();
+        CountDownLatch notified = new CountDownLatch(1);
+        Shell shell = new Shell() {
+            @Override public OutputStream getOutputStream() {
+                return new OutputStream() {
+                    @Override public void write(int value) throws IOException {
+                        throw new IOException("writer failed");
+                    }
+                };
+            }
+            @Override public void disconnect() {
+                closed.incrementAndGet();
+                super.disconnect();
+                throw new IllegalStateException("teardown failed after write");
+            }
+        };
+        TerminalSession terminal = new TerminalSession(sessionFor(shell), 80, 24, () -> {
+            notified.countDown();
+            return Unit.INSTANCE;
+        });
+        terminal.send("hello");
+        assertTrue(notified.await(2, TimeUnit.SECONDS));
+        assertEquals(TerminalSession.Status.ERROR, terminal.getStatus().getValue());
+        assertEquals("writer failed", terminal.getError().getValue());
+        terminal.close();
+        assertEquals(1, closed.get());
+    }
+
+    @Test public void rejectsInputOverflowWithVisibleError() throws Exception {
+        try (TerminalSession terminal = terminal(new Shell())) {
+            terminal.sendBytes(new byte[1024 * 1024 + 1]);
+            assertEquals(TerminalSession.Status.ERROR, terminal.getStatus().getValue());
+            assertEquals("Переполнена очередь ввода терминала", terminal.getError().getValue());
+        }
+    }
+
+    @Test public void reportsFlushFailureEvenWhenCloseIsAlreadyQueued() throws Exception {
+        CountDownLatch flushing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch notified = new CountDownLatch(1);
+        Shell shell = new Shell() {
+            @Override public OutputStream getOutputStream() {
+                return new OutputStream() {
+                    @Override public void write(int value) { }
+                    @Override public void flush() throws IOException {
+                        flushing.countDown();
+                        try { release.await(2, TimeUnit.SECONDS); }
+                        catch (InterruptedException e) { throw new IOException(e); }
+                        throw new IOException("flush failed");
+                    }
+                };
+            }
+        };
+        TerminalSession terminal = new TerminalSession(sessionFor(shell), 80, 24, () -> {
+            notified.countDown();
+            return Unit.INSTANCE;
+        });
+        try {
+            terminal.send("hello");
+            assertTrue(flushing.await(1, TimeUnit.SECONDS));
+            terminal.close();
+        } finally {
+            release.countDown();
+            terminal.close();
+        }
+        assertTrue(notified.await(2, TimeUnit.SECONDS));
+        assertEquals(TerminalSession.Status.ERROR, terminal.getStatus().getValue());
+        assertEquals("flush failed", terminal.getError().getValue());
+    }
+
+    @Test public void reportsResizeFailure() throws Exception {
+        Shell shell = new Shell() {
+            @Override public void setPtySize(int cols, int rows, int width, int height) {
+                if (cols == 42) throw new IllegalStateException("resize failed");
+            }
+        };
+        try (TerminalSession terminal = terminal(shell)) {
+            terminal.resize(42, 10);
+            await(() -> terminal.getStatus().getValue() == TerminalSession.Status.ERROR);
+            assertEquals("resize failed", terminal.getError().getValue());
+        }
+    }
+
+    @Test public void reportsDisconnectFailure() throws Exception {
+        Shell shell = new Shell() {
+            @Override public void disconnect() {
+                super.disconnect();
+                throw new IllegalStateException("disconnect failed");
+            }
+        };
+        TerminalSession terminal = terminal(shell);
+        terminal.close();
+        await(() -> terminal.getStatus().getValue() == TerminalSession.Status.ERROR);
+        assertEquals("disconnect failed", terminal.getError().getValue());
+    }
+
+    @Test public void boundsQueuedAndInFlightInputTogether() throws Exception {
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch notified = new CountDownLatch(1);
+        Shell shell = new Shell() {
+            @Override public OutputStream getOutputStream() {
+                return new OutputStream() {
+                    @Override public void write(int value) { }
+                    @Override public void write(byte[] bytes, int offset, int length) throws IOException {
+                        writing.countDown();
+                        try {
+                            if (!release.await(2, TimeUnit.SECONDS)) throw new IOException("write blocked");
+                        } catch (InterruptedException e) { throw new IOException(e); }
+                    }
+                };
+            }
+        };
+        TerminalSession terminal = new TerminalSession(sessionFor(shell), 80, 24, () -> {
+            notified.countDown();
+            return Unit.INSTANCE;
+        });
+        try {
+            terminal.sendBytes(new byte[1024 * 1024 - 1]);
+            assertTrue(writing.await(1, TimeUnit.SECONDS));
+            terminal.send("x"); // active write plus this queued byte fills the budget
+            assertEquals(TerminalSession.Status.CONNECTED, terminal.getStatus().getValue());
+            terminal.send("y");
+            assertEquals(TerminalSession.Status.ERROR, terminal.getStatus().getValue());
+            assertEquals("Переполнена очередь ввода терминала", terminal.getError().getValue());
+        } finally {
+            release.countDown();
+            terminal.close();
+        }
+        assertTrue(notified.await(2, TimeUnit.SECONDS));
+    }
+
 }

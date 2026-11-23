@@ -6,14 +6,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.Closeable
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * One `shell` channel on an already-open SSH session, driven by [TerminalScreen].
  *
- * The channel pump owns all screen mutation; readers only look at [screen] and [revision].
+ * Constructed on Dispatchers.IO by ConnectionManager. After connection, only the writer touches
+ * the JSch output stream, PTY and channel teardown. The reader owns incoming data.
  */
 class TerminalSession(
     private val session: Session,
@@ -38,8 +41,13 @@ class TerminalSession(
     private val closed = AtomicBoolean(false)
     private val flushStop = AtomicBoolean(false)
     private val dirty = AtomicBoolean(false)
-    private val writeLock = Any()
-    private val closeLock = Any()
+    // Serializes admission from the UI and DSR reader, including the final close command.
+    // Never hold this lock during socket I/O or screen mutation.
+    private val queueLock = Any()
+    private val writer = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "lynk-terminal-write").apply { isDaemon = true }
+    }
+    private var pendingBytes = 0
 
     @Volatile
     private var channel: ChannelShell? = null
@@ -64,16 +72,12 @@ class TerminalSession(
             val input = ch.inputStream
             output = ch.outputStream
             ch.connect(CONNECT_TIMEOUT_MS)
-            // Answers to DSR / device-status queries go straight back to the host.
+            // DSR replies share the FIFO with user input.
             screen.onResponse = { reply -> sendBytes(reply.toByteArray(Charsets.UTF_8)) }
             _status.value = Status.CONNECTED
             startPump(input)
         } catch (t: Throwable) {
-            runCatching { channel?.disconnect() }
-            channel = null
-            output = null
-            _error.value = ConnectionManager.describe(t)
-            _status.value = Status.ERROR
+            fail(t)
         }
     }
 
@@ -85,14 +89,31 @@ class TerminalSession(
     }
 
     fun sendBytes(bytes: ByteArray) {
-        if (bytes.isEmpty() || closed.get()) return
-        synchronized(writeLock) {
-            val stream = output ?: return
-            runCatching {
-                // getOutputStream() creates a new buffered stream on every call.
-                stream.write(bytes)
-                stream.flush()
-            }.onFailure { fail(it) }
+        if (bytes.isEmpty()) return
+        synchronized(queueLock) {
+            if (closed.get()) return
+            // Bound retained input without ever waiting for the network on the caller.
+            // Overflow is an explicit terminal error; never silently drop keystrokes.
+            if (bytes.size > MAX_PENDING_BYTES - pendingBytes) {
+                fail(IOException("Переполнена очередь ввода терминала"))
+                return
+            }
+            val copy = bytes.copyOf()
+            pendingBytes += copy.size
+            writer.execute {
+                try {
+                    if (_status.value != Status.ERROR) {
+                        val stream = output ?: throw IOException("Канал терминала закрыт")
+                        // getOutputStream() creates a new buffer each time: reuse this stream.
+                        stream.write(copy)
+                        stream.flush()
+                    }
+                } catch (t: Throwable) {
+                    fail(t, acceptedCommand = true)
+                } finally {
+                    synchronized(queueLock) { pendingBytes -= copy.size }
+                }
+            }
         }
     }
 
@@ -121,30 +142,51 @@ class TerminalSession(
         screen.resize(c, r)
         dirty.set(true)
         publish()
-        val ch = channel ?: return
-        runCatching { ch.setPtySize(c, r, 0, 0) }
-        runCatching { sendWindowChange(ch, c, r) }
+        synchronized(queueLock) {
+            if (closed.get()) return
+            writer.execute {
+                if (_status.value != Status.ERROR) {
+                    try {
+                        val ch = channel ?: return@execute
+                        // JSch setPtySize already sends SSH_MSG_CHANNEL_REQUEST/window-change.
+                        ch.setPtySize(c, r, 0, 0)
+                    } catch (t: Throwable) {
+                        fail(t, acceptedCommand = true)
+                    }
+                }
+            }
+        }
     }
 
     // ---- lifecycle -----------------------------------------------------------
 
     override fun close() {
-        synchronized(closeLock) {
-            if (!closed.compareAndSet(false, true)) return
-        }
+        synchronized(queueLock) { closeLocked() }
+    }
+
+    private fun closeLocked() {
+        if (!closed.compareAndSet(false, true)) return
         flushStop.set(true)
-        runCatching { channel?.disconnect() }
-        runCatching { reader?.interrupt() }
-        runCatching { flusher?.interrupt() }
-        val r = reader
-        if (r != null && r !== Thread.currentThread()) runCatching { r.join(500) }
-        val f = flusher
-        if (f != null && f !== Thread.currentThread()) runCatching { f.join(200) }
-        channel = null
-        output = null
-        publishNow()
-        _status.value = Status.CLOSED
-        runCatching { onClosed() }
+        // FIFO: accepted input is flushed before disconnect. No joins or I/O on the caller.
+        writer.execute {
+            try {
+                channel?.disconnect()
+            } catch (t: Throwable) {
+                if (_status.value != Status.ERROR) {
+                    _error.value = ConnectionManager.describe(t)
+                    _status.value = Status.ERROR
+                }
+            } finally {
+                reader?.interrupt()
+                flusher?.interrupt()
+                channel = null
+                output = null
+                publishNow()
+                if (_status.value != Status.ERROR) _status.value = Status.CLOSED
+                runCatching { onClosed() }
+            }
+        }
+        writer.shutdown() // queued work drains; no caller-runs rejection policy
     }
 
     // ---- pump ----------------------------------------------------------------
@@ -167,7 +209,7 @@ class TerminalSession(
             } finally {
                 publishNow()
                 flushStop.set(true)
-                if (!closed.get() && _status.value != Status.ERROR) _status.value = Status.CLOSED
+                close()
             }
         }, "lynk-terminal-read")
         readThread.isDaemon = true
@@ -199,36 +241,20 @@ class TerminalSession(
         _revision.value = screen.revision
     }
 
-    private fun fail(t: Throwable) {
-        if (closed.get()) return
-        _error.value = ConnectionManager.describe(t)
-        _status.value = Status.ERROR
-    }
-
-    /**
-     * JSch exposes no public window-change call, and the method name drifted between forks, so this
-     * is best effort: a missing method just means the peer keeps the old size until reconnects.
-     */
-    private fun sendWindowChange(ch: ChannelShell, cols: Int, rows: Int) {
-        var type: Class<*>? = ch.javaClass
-        val int = Int::class.javaPrimitiveType
-        while (type != null) {
-            try {
-                val method = type.getDeclaredMethod("sendWindowChange", int, int, int, int)
-                method.isAccessible = true
-                method.invoke(ch, cols, rows, 0, 0)
-                return
-            } catch (_: NoSuchMethodException) {
-                type = type.superclass
-            } catch (_: Throwable) {
-                return
-            }
+    private fun fail(t: Throwable, acceptedCommand: Boolean = false) {
+        synchronized(queueLock) {
+            // An accepted write may fail while an explicit close is already queued.
+            if (_status.value == Status.ERROR || (closed.get() && !acceptedCommand)) return
+            _error.value = ConnectionManager.describe(t)
+            _status.value = Status.ERROR
+            closeLocked()
         }
     }
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 10_000
         private const val THROTTLE_MS = 30L
+        private const val MAX_PENDING_BYTES = 1024 * 1024
 
         const val KEY_ESCAPE = 27
         const val KEY_TAB = 9
