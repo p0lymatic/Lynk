@@ -130,6 +130,8 @@ class Store(private val context: Context) {
 
     fun updateMonitor(settings: MonitorSettings) = mutate { data -> data.copy(monitor = settings) }
 
+    fun updateTerminal(settings: TerminalSettings) = mutate { data -> data.copy(terminal = settings) }
+
     fun updateServerOs(serverId: String, osId: String, osName: String, osArch: String) = mutate { data ->
         data.copy(
             servers = data.servers.map { server ->

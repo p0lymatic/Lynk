@@ -3,26 +3,46 @@ package com.p0lymatic.lynk.ui
 import android.content.Context
 import android.text.InputType
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 
 /**
- * Invisible view that owns the keyboard for the terminal.
+ * Invisible, full-size view that owns the keyboard for the terminal.
  *
- * Terminals want finished text, not IME composition: with [InputType.TYPE_NULL] the keyboard
- * commits characters as they are typed, and every key press becomes bytes on the wire. This is
- * the part the old hidden text field got wrong — it fought the IME and dropped input.
+ * Full-size on purpose: a 1 dp view cannot reliably take focus, and the IME refuses to open for
+ * something it cannot see. Terminals also want finished text, not IME composition — with
+ * [InputType.TYPE_NULL] the keyboard commits characters as they are typed.
  */
 class TerminalInputView(context: Context) : View(context) {
 
     var onBytes: ((ByteArray) -> Unit)? = null
 
+    private val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
     init {
         isFocusable = true
         isFocusableInTouchMode = true
         setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        setOnTouchListener { view, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                if (!view.isFocused) view.requestFocus()
+                showKeyboard()
+            }
+            false
+        }
+    }
+
+    fun showKeyboard() {
+        if (!isFocused) requestFocus()
+        post { runCatching { imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) } }
+    }
+
+    fun hideKeyboard() {
+        runCatching { imm.hideSoftInputFromWindow(windowToken, 0) }
     }
 
     override fun onCheckIsTextEditor(): Boolean = true

@@ -102,12 +102,23 @@ data class MonitorSettings(
 }
 
 @Serializable
+data class TerminalSettings(
+    val fontId: String = "system",
+    val fontSize: Float = 11f,
+    val schemeId: String = "grey",
+    /** block, underline or bar */
+    val cursorStyle: String = "block",
+    val blink: Boolean = true,
+)
+
+@Serializable
 data class AppData(
     val servers: List<ServerConfig> = emptyList(),
     val services: List<Service> = emptyList(),
     val tunnels: List<Tunnel> = emptyList(),
     val hostKeys: List<HostKeyEntry> = emptyList(),
     val monitor: MonitorSettings = MonitorSettings(),
+    val terminal: TerminalSettings = TerminalSettings(),
 )
 
 /** Thrown when the server offers a key we have never seen. */

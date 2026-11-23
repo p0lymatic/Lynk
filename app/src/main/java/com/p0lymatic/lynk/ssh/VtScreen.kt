@@ -89,7 +89,7 @@ class VtScreen(cols: Int, rows: Int) {
     var onResponse: ((String) -> Unit)? = null
 
     private var revisionValue = 0L
-    val revision: Long get() = revisionValue
+    val revision: Long @Synchronized get() = revisionValue
 
     // pen
     private var penFg = Cell.NO_COLOR
@@ -118,6 +118,7 @@ class VtScreen(cols: Int, rows: Int) {
 
     // ---- public API ----------------------------------------------------------
 
+    @Synchronized
     fun resize(newCols: Int, newRows: Int) {
         val c = newCols.coerceAtLeast(1)
         val r = newRows.coerceAtLeast(1)
@@ -139,6 +140,7 @@ class VtScreen(cols: Int, rows: Int) {
 
     private var carry = ByteArray(0)
 
+    @Synchronized
     fun feed(bytes: ByteArray, offset: Int, length: Int) {
         if (length <= 0) return
         val chunk = bytes.copyOfRange(offset, offset + length)
@@ -155,11 +157,13 @@ class VtScreen(cols: Int, rows: Int) {
         if (output.hasRemaining()) feed(output.toString())
     }
 
+    @Synchronized
     fun feed(text: String) {
         for (ch in text) step(ch)
         bump()
     }
 
+    @Synchronized
     fun clear() {
         main = newGrid(cols, rows)
         alt = newGrid(cols, rows)
@@ -172,6 +176,7 @@ class VtScreen(cols: Int, rows: Int) {
     }
 
     /** Rows currently on screen, top to bottom, with the cursor column marked. */
+    @Synchronized
     fun snapshot(): List<RowSnapshot> {
         val out = ArrayList<RowSnapshot>(rows)
         for (r in 0 until rows) {

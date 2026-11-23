@@ -87,4 +87,22 @@ class VtScreenTest {
         assertEquals("abc", vt.text()[0])
         assertEquals("def", vt.text()[1])
     }
+
+    @Test
+    fun `concurrent feed and snapshot never throw`() {
+        val vt = VtScreen(80, 24)
+        val writer = Thread {
+            repeat(400) { i ->
+                vt.feed("line $i\r\n")
+                vt.feed("\u001b[31mred\u001b[0m text\r\n")
+            }
+        }
+        writer.start()
+        repeat(600) {
+            val rows = vt.snapshot()
+            assertEquals(24, rows.size)
+        }
+        writer.join(5_000)
+        assertTrue(vt.snapshot().isNotEmpty())
+    }
 }
