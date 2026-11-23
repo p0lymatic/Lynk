@@ -22,7 +22,7 @@ class TerminalSession(
 
     enum class Status { CONNECTING, CONNECTED, CLOSED, ERROR }
 
-    val screen = TerminalScreen(cols, rows)
+    val screen = VtScreen(cols, rows)
 
     private val _revision = MutableStateFlow(0L)
     val revision: StateFlow<Long> = _revision.asStateFlow()
@@ -56,6 +56,8 @@ class TerminalSession(
             ch.setEnv("TERM", "xterm-256color")
             ch.connect(CONNECT_TIMEOUT_MS)
             channel = ch
+            // Answers to DSR / device-status queries go straight back to the host.
+            screen.onResponse = { reply -> sendBytes(reply.toByteArray(Charsets.UTF_8)) }
             _status.value = Status.CONNECTED
             startPump(ch)
         } catch (t: Throwable) {

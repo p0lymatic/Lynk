@@ -3,11 +3,12 @@ package com.p0lymatic.lynk.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,13 +18,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
@@ -44,145 +40,106 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.p0lymatic.lynk.ssh.ConnectionManager
-import com.p0lymatic.lynk.ssh.TerminalLine
-import com.p0lymatic.lynk.ssh.TerminalScreen as TermScreen
+import com.p0lymatic.lynk.ssh.RowSnapshot
 import com.p0lymatic.lynk.ssh.TerminalSession
 import com.p0lymatic.lynk.ui.theme.LynkColors
 import com.p0lymatic.lynk.ui.theme.Mono
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlin.math.max
-
-private val ANSI_PALETTE = intArrayOf(
-    0xFF2A2A30.toInt(), 0xFFB4716F.toInt(), 0xFF7FA98C.toInt(), 0xFFB49A5E.toInt(),
-    0xFF6F8FAF.toInt(), 0xFF9A7FA9.toInt(), 0xFF6F9FA9.toInt(), 0xFFD6D6DB.toInt(),
-    0xFF55555E.toInt(), 0xFFC98A87.toInt(), 0xFF98BFA4.toInt(), 0xFFC9B27E.toInt(),
-    0xFF8FA8BF.toInt(), 0xFFB39ABF.toInt(), 0xFF8FB9BF.toInt(), 0xFFF2F2F4.toInt(),
-)
 
 /**
- * Interactive shell. Colour output is kept, but muted to the same grey family as the rest of Lynk
- * so that `ls --color` stays readable without turning the screen into a rainbow.
+ * Terminal screen: a real grid renderer on top of [VtScreen].
+ *
+ * Input goes through [TerminalInputView] (an InputConnection, not a hidden text field), so
+ * keystrokes arrive as bytes, IME composition never fights the screen, and Ctrl combos work.
  */
 @Composable
 fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
-    val server = app.store.server(serverId)
-    var fontSize by rememberSaveable { mutableStateOf(13f) }
+    val server = remember(serverId) { app.serverOf(serverId) }
     var session by remember { mutableStateOf<TerminalSession?>(null) }
-    var revision by remember { mutableStateOf(0L) }
     var status by remember { mutableStateOf(TerminalSession.Status.CONNECTING) }
     var error by remember { mutableStateOf<String?>(null) }
-    var ctrl by remember { mutableStateOf(false) }
-    var field by remember { mutableStateOf(TextFieldValue("")) }
-    var sentChars by remember { mutableStateOf(0) }
-    var autoScroll by remember { mutableStateOf(true) }
+    var revision by remember { mutableStateOf(0L) }
+    var rowsData by remember { mutableStateOf<List<RowSnapshot>>(emptyList()) }
+    var fontSize by rememberSaveable { mutableStateOf(11f) }
+    var ctrlArmed by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
     var cols by remember { mutableStateOf(80) }
     var rows by remember { mutableStateOf(24) }
+    var cursorOn by remember { mutableStateOf(true) }
 
-    val listState = rememberLazyListState()
-    val clipboard = LocalClipboardManager.current
-    val keyboard = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
-    val density = LocalDensity.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val clipboard = LocalClipboardManager.current
+    val inputHolder = remember { arrayOfNulls<TerminalInputView>(1) }
 
-    DisposableEffect(Unit) {
-        onDispose { session?.close() }
+    fun send(bytes: ByteArray) {
+        val target = session ?: return
+        if (ctrlArmed && bytes.size == 1) {
+            val code = bytes[0].toInt() and 0xFF
+            val mapped = when {
+                code in 'a'.code..'z'.code -> code - 'a'.code + 1
+                code in 'A'.code..'Z'.code -> code - 'A'.code + 1
+                else -> code
+            }
+            ctrlArmed = false
+            target.sendBytes(byteArrayOf(mapped.toByte()))
+        } else {
+            target.sendBytes(bytes)
+        }
     }
 
     LaunchedEffect(serverId, reloadKey) {
-        val node = server ?: run {
+        val node = server
+        if (node == null) {
             error = "Узел не найден"
+            status = TerminalSession.Status.ERROR
             return@LaunchedEffect
         }
+        session?.close()
+        session = null
         error = null
         status = TerminalSession.Status.CONNECTING
         try {
-            val started = withContext(Dispatchers.IO) {
-                app.connections.openTerminal(node, cols, rows)
-            }
-            session = started
+            session = app.connections.openTerminal(node, cols, rows)
         } catch (t: Throwable) {
             error = ConnectionManager.describe(t)
             status = TerminalSession.Status.ERROR
         }
     }
 
+    DisposableEffect(Unit) {
+        onDispose { session?.close() }
+    }
+
     LaunchedEffect(session) {
         val current = session ?: return@LaunchedEffect
+        launch { current.status.collect { status = it } }
+        launch { current.error.collect { error = it } }
         current.revision.collect { revision = it }
     }
 
-    LaunchedEffect(session) {
-        val current = session ?: return@LaunchedEffect
-        current.status.collect { status = it }
+    LaunchedEffect(revision) {
+        rowsData = session?.screen?.snapshot() ?: emptyList()
     }
 
-    val term: TermScreen? = session?.screen
-    val totalLines = term?.totalLines() ?: 0
-
-    LaunchedEffect(revision, totalLines) {
-        if (autoScroll && totalLines > 0) {
-            listState.scrollToItem((totalLines - 1).coerceAtLeast(0))
-        }
-    }
-
-    LaunchedEffect(listState.canScrollForward) {
-        autoScroll = !listState.canScrollForward
-    }
-
-    LaunchedEffect(cols, rows, session) {
-        if (session == null) return@LaunchedEffect
-        delay(300)
-        session?.resize(cols, rows)
-    }
-
-    fun sendText(text: String) {
-        val current = session ?: return
-        runCatching {
-            if (ctrl && text.isNotEmpty()) {
-                val first = text.first()
-                val code = when {
-                    first in 'a'..'z' -> first.code - 'a'.code + 1
-                    first in 'A'..'Z' -> first.code - 'A'.code + 1
-                    first == '[' -> 27
-                    first == ' ' -> 0
-                    else -> first.code
-                }
-                current.sendBytes(byteArrayOf(code.toByte()))
-                if (text.length > 1) current.send(text.substring(1))
-                ctrl = false
-            } else {
-                current.send(text)
-            }
-        }.onFailure { app.notify(ConnectionManager.describe(it)) }
-    }
-
-    fun sendSequence(vararg bytes: Int) {
-        runCatching {
-            session?.sendBytes(ByteArray(bytes.size) { bytes[it].toByte() })
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(530)
+            cursorOn = !cursorOn
         }
     }
 
@@ -199,204 +156,147 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         ScreenHeader(
             title = server?.name ?: "Терминал",
             subtitle = when {
-                error != null -> "ошибка"
+                error != null -> error ?: "ошибка"
                 status == TerminalSession.Status.CONNECTED -> "ssh · ${server?.user}@${server?.host}"
                 status == TerminalSession.Status.CONNECTING -> "подключение…"
                 else -> "сессия закрыта"
             },
             onBack = { nav.pop() },
             actions = {
-                TextButton(onClick = { fontSize = (fontSize - 1f).coerceAtLeast(9f) }) {
+                TextButton(onClick = { fontSize = (fontSize - 1f).coerceAtLeast(7f) }) {
                     Text("A−", color = LynkColors.textDim, fontSize = 12.sp, fontFamily = Mono)
                 }
-                TextButton(onClick = { fontSize = (fontSize + 1f).coerceAtMost(22f) }) {
+                TextButton(onClick = { fontSize = (fontSize + 1f).coerceAtMost(20f) }) {
                     Text("A+", color = LynkColors.textDim, fontSize = 12.sp, fontFamily = Mono)
                 }
-                IconButton(onClick = { reloadKey++ }, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = { reloadKey++ }, modifier = Modifier.size(38.dp)) {
                     Icon(
-                        Icons.Filled.Refresh,
+                        imageVector = Icons.Filled.Refresh,
                         contentDescription = "Переподключиться",
                         tint = LynkColors.textDim,
-                        modifier = Modifier.size(17.dp),
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             },
         )
 
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-            val widthPx = with(density) { maxWidth.toPx() }
-            val heightPx = with(density) { maxHeight.toPx() }
-            val cellWidth = with(density) { (fontSize * 0.6f).dp.toPx() }
-            val cellHeight = with(density) { (fontSize * 1.3f).dp.toPx() }
-            val computedCols = max(20, ((widthPx - 16f) / cellWidth).toInt())
-            val computedRows = max(8, ((heightPx - 8f) / cellHeight).toInt())
+            val density = LocalDensity.current
+            val cellWidth = with(density) { (fontSize * 0.605f).sp.toDp() }
+            val cellHeight = with(density) { (fontSize * 1.2f).sp.toDp() }
+            val wantCols = (maxWidth / cellWidth).toInt().coerceIn(20, 400)
+            val wantRows = (maxHeight / cellHeight).toInt().coerceIn(4, 200)
 
-            LaunchedEffect(computedCols, computedRows) {
-                cols = computedCols
-                rows = computedRows
+            LaunchedEffect(wantCols, wantRows) {
+                if (wantCols != cols || wantRows != rows) {
+                    cols = wantCols
+                    rows = wantRows
+                    session?.resize(wantCols, wantRows)
+                }
             }
 
-            val textStyle = TextStyle(
-                fontFamily = Mono,
-                fontSize = fontSize.sp,
-                lineHeight = (fontSize * 1.3f).sp,
-                color = LynkColors.text,
-            )
-
-            if (error != null && session == null) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(24.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text("Терминал не открылся", fontSize = 15.sp, color = LynkColors.textDim)
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        error!!,
-                        fontSize = 12.sp,
-                        color = LynkColors.textMuted,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        lineHeight = 17.sp,
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    GhostButton("Повторить", onClick = { reloadKey++ })
-                }
-            } else {
-                Box(Modifier.fillMaxSize()) {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clickable {
-                                focusRequester.requestFocus()
-                                keyboard?.show()
-                            },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        items(totalLines) { index ->
-                            val line = term?.lineAt(index)
-                            if (line != null) {
-                                Text(
-                                    text = buildLine(
-                                        line = line,
-                                        index = index,
-                                        cursorAbsRow = term.absoluteCursorRow(),
-                                        cursorCol = term.cursorCol,
-                                        showCursor = term.cursorVisible && status == TerminalSession.Status.CONNECTED,
-                                    ),
-                                    style = textStyle,
-                                    softWrap = false,
-                                    maxLines = 1,
-                                )
-                            }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures {
+                            runCatching { focusRequester.requestFocus() }
+                            keyboard?.show()
                         }
-                    }
-
-                    if (!autoScroll) {
-                        Surface2(
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
-                            onClick = {
-                                autoScroll = true
-                                app.scope.launch { listState.scrollToItem((totalLines - 1).coerceAtLeast(0)) }
-                            },
+                    },
+            ) {
+                if (rowsData.isEmpty()) {
+                    Text(
+                        text = when {
+                            error != null -> error ?: ""
+                            status == TerminalSession.Status.CONNECTING -> "Подключаюсь…"
+                            else -> "Пустая сессия"
+                        },
+                        fontFamily = Mono,
+                        fontSize = 11.sp,
+                        color = LynkColors.textMuted,
+                        modifier = Modifier.padding(12.dp),
+                    )
+                } else {
+                    rowsData.forEach { row ->
+                        Text(
+                            text = buildRow(row, cursorOn, fontSize),
+                            fontFamily = Mono,
+                            fontSize = fontSize.sp,
+                            lineHeight = (fontSize * 1.2f).sp,
+                            softWrap = false,
+                            maxLines = 1,
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 }
             }
+
+            AndroidView(
+                factory = { context ->
+                    TerminalInputView(context).also { view ->
+                        view.onBytes = { bytes -> send(bytes) }
+                        inputHolder[0] = view
+                    }
+                },
+                modifier = Modifier
+                    .size(1.dp)
+                    .focusRequester(focusRequester),
+            )
         }
 
-        // Key strip: what a phone keyboard cannot send on its own.
+        if (error != null && status != TerminalSession.Status.CONNECTED) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = error ?: "",
+                    color = LynkColors.err,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { reloadKey++ }) {
+                    Text("Повторить", color = LynkColors.text, fontSize = 12.sp)
+                }
+            }
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(LynkColors.surface)
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            KeyCap("Esc") { sendSequence(27) }
-            KeyCap("Tab") { sendSequence(9) }
-            KeyCap("Ctrl", active = ctrl) { ctrl = !ctrl }
-            KeyCap("/") { sendText("/") }
-            KeyCap("-") { sendText("-") }
-            KeyCap("|") { sendText("|") }
-            Spacer(Modifier.weight(1f))
-            KeyCap("←") { sendSequence(27, 91, 68) }
-            KeyCap("↑") { sendSequence(27, 91, 65) }
-            KeyCap("↓") { sendSequence(27, 91, 66) }
-            KeyCap("→") { sendSequence(27, 91, 67) }
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(LynkColors.surface)
-                .padding(horizontal = 8.dp)
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            KeyCap("Paste") {
-                val text = clipboard.getText()?.text
-                if (!text.isNullOrEmpty()) sendText(text)
+            TermKey("Esc") { send(byteArrayOf(27)) }
+            TermKey("Tab") { send(byteArrayOf(9)) }
+            TermKey("Ctrl", active = ctrlArmed) { ctrlArmed = !ctrlArmed }
+            TermKey("↑") { send(byteArrayOf(27, 91, 65)) }
+            TermKey("↓") { send(byteArrayOf(27, 91, 66)) }
+            TermKey("←") { send(byteArrayOf(27, 91, 68)) }
+            TermKey("→") { send(byteArrayOf(27, 91, 67)) }
+            TermKey("^C") { send(byteArrayOf(3)) }
+            TermKey("^D") { send(byteArrayOf(4)) }
+            TermKey("|") { send("|".toByteArray()) }
+            TermKey("-") { send("-".toByteArray()) }
+            TermKey("/") { send("/".toByteArray()) }
+            TermKey("~") { send("~".toByteArray()) }
+            TermKey("Вставить") {
+                val text = clipboard.getText()?.text.orEmpty()
+                if (text.isNotEmpty()) session?.send(text)
             }
-            KeyCap("Home") { sendSequence(27, 91, 72) }
-            KeyCap("End") { sendSequence(27, 91, 70) }
-            KeyCap("PgUp") { sendSequence(27, 91, 53, 126) }
-            KeyCap("PgDn") { sendSequence(27, 91, 54, 126) }
-            Spacer(Modifier.weight(1f))
-            KeyCap("↵") { sendSequence(13) }
+            TermKey("⌨") {
+                runCatching { focusRequester.requestFocus() }
+                keyboard?.show()
+            }
         }
-
-        BasicTextField(
-            value = field,
-            onValueChange = { value ->
-                field = value
-                // IME composition is left alone: clearing the field mid-composition is what
-                // crashes the input connection on some keyboards.
-                if (value.composition == null) {
-                    val text = value.text
-                    if (text.length > sentChars) sendText(text.substring(sentChars))
-                    sentChars = text.length
-                    if (text.length > 512) {
-                        field = TextFieldValue("")
-                        sentChars = 0
-                    }
-                }
-            },
-            modifier = Modifier
-                .size(1.dp)
-                .focusRequester(focusRequester)
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    when (event.key) {
-                        Key.Enter -> { sendSequence(13); true }
-                        Key.Backspace -> { sendSequence(127); true }
-                        Key.Escape -> { sendSequence(27); true }
-                        Key.Tab -> { sendSequence(9); true }
-                        Key.DirectionUp -> { sendSequence(27, 91, 65); true }
-                        Key.DirectionDown -> { sendSequence(27, 91, 66); true }
-                        Key.DirectionRight -> { sendSequence(27, 91, 67); true }
-                        Key.DirectionLeft -> { sendSequence(27, 91, 68); true }
-                        Key.MoveHome -> { sendSequence(27, 91, 72); true }
-                        Key.MoveEnd -> { sendSequence(27, 91, 70); true }
-                        else -> false
-                    }
-                },
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Password,
-                imeAction = ImeAction.None,
-                autoCorrectEnabled = false,
-            ),
-            keyboardActions = KeyboardActions(onAny = {}),
-            singleLine = false,
-            textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-            cursorBrush = SolidColor(Color.Transparent),
-        )
     }
 }
 
 @Composable
-private fun KeyCap(label: String, active: Boolean = false, onClick: () -> Unit) {
+private fun TermKey(label: String, active: Boolean = false, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(7.dp))
@@ -409,56 +309,70 @@ private fun KeyCap(label: String, active: Boolean = false, onClick: () -> Unit) 
             text = label,
             fontFamily = Mono,
             fontSize = 11.5.sp,
-            color = if (active) LynkColors.bg else LynkColors.textDim,
+            color = if (active) LynkColors.termBg else LynkColors.textDim,
             maxLines = 1,
         )
     }
 }
 
-@Composable
-private fun Surface2(modifier: Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(LynkColors.surfaceHigh)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-    ) {
-        Text("↓ вниз", fontFamily = Mono, fontSize = 11.sp, color = LynkColors.textDim)
+/** Builds one styled row, with a block cursor when it sits on this line. */
+private fun buildRow(row: RowSnapshot, cursorOn: Boolean, fontSize: Float): AnnotatedString {
+    val text = row.text
+    return buildAnnotatedString {
+        append(text)
+        row.spans.forEach { span ->
+            val end = span.end.coerceAtMost(text.length)
+            if (span.start >= end) return@forEach
+            val fg = if (span.fg >= 0) ansiColor(span.fg) else null
+            val bg = if (span.bg >= 0) ansiColor(span.bg) else null
+            addStyle(
+                SpanStyle(
+                    color = if (span.inverse) (bg ?: LynkColors.termBg) else (fg ?: LynkColors.text),
+                    background = when {
+                        span.inverse -> fg ?: LynkColors.text
+                        bg != null -> bg
+                        else -> Color.Transparent
+                    },
+                    fontWeight = if (span.bold) FontWeight.Bold else null,
+                    textDecoration = if (span.underline) TextDecoration.Underline else null,
+                ),
+                span.start,
+                end,
+            )
+        }
+        if (row.cursorCol >= 0 && cursorOn) {
+            val at = row.cursorCol.coerceAtLeast(0)
+            if (at >= length) append(" ".repeat(at - length + 1))
+            addStyle(
+                SpanStyle(background = LynkColors.text, color = LynkColors.termBg),
+                at,
+                (at + 1).coerceAtMost(length),
+            )
+        }
     }
 }
 
-private fun buildLine(
-    line: TerminalLine,
-    index: Int,
-    cursorAbsRow: Int,
-    cursorCol: Int,
-    showCursor: Boolean,
-): AnnotatedString = buildAnnotatedString {
-    var i = 0
-    while (i < line.chars.size) {
-        val color = line.color[i].toInt() and 0x0F
-        val bold = line.bold[i]
-        val isCursor = showCursor && index == cursorAbsRow && i == cursorCol
-        var j = i + 1
-        while (j < line.chars.size) {
-            val sameColor = (line.color[j].toInt() and 0x0F) == color
-            val sameBold = line.bold[j] == bold
-            val sameCursor = !(showCursor && index == cursorAbsRow && j == cursorCol)
-            if (!sameColor || !sameBold || !sameCursor) break
-            j++
+/** Muted 16-colour palette plus a rough 256-colour fallback, matching the grey theme. */
+private fun ansiColor(index: Int): Color {
+    val base = listOf(
+        Color(0xFF1C1C1F), Color(0xFFB4716F), Color(0xFF7FA98C), Color(0xFFB49A5E),
+        Color(0xFF7C90B4), Color(0xFFA08BB5), Color(0xFF6FA3A8), Color(0xFFC9C9CF),
+        Color(0xFF5A5A64), Color(0xFFD08A87), Color(0xFF93C2A0), Color(0xFFCBB071),
+        Color(0xFF93A8CC), Color(0xFFB79FCB), Color(0xFF86BCC1), Color(0xFFE7E7EA),
+    )
+    return when {
+        index in 0..15 -> base[index]
+        index in 16..231 -> {
+            val i = index - 16
+            val r = if (i / 36 == 0) 0 else 55 + (i / 36) * 40
+            val g = if ((i % 36) / 6 == 0) 0 else 55 + ((i % 36) / 6) * 40
+            val b = if (i % 6 == 0) 0 else 55 + (i % 6) * 40
+            Color(0xFF000000.toInt() or (r shl 16) or (g shl 8) or b)
         }
-        val text = String(line.chars, i, j - i)
-        val fg = if (color == 0) LynkColors.termBg else Color(ANSI_PALETTE[color.coerceIn(0, 15)])
-        pushStyle(
-            SpanStyle(
-                color = if (isCursor) LynkColors.termBg else fg,
-                background = if (isCursor) LynkColors.textDim else Color.Unspecified,
-                fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
-            ),
-        )
-        append(text)
-        pop()
-        i = j
+        index in 232..255 -> {
+            val level = 8 + (index - 232) * 10
+            Color(0xFF000000.toInt() or (level shl 16) or (level shl 8) or level)
+        }
+        else -> LynkColors.text
     }
 }
