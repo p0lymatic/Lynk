@@ -133,6 +133,7 @@ private fun connectionsWord(count: Int): String = when {
 private fun TabId.title(): String = when (this) {
     TabId.HOME -> "Дом"
     TabId.SERVERS -> "Узлы"
+    TabId.MONITOR -> "Мониторинг"
     TabId.TUNNELS -> "Туннели"
     TabId.SETTINGS -> "Настройки"
 }
@@ -140,6 +141,7 @@ private fun TabId.title(): String = when (this) {
 private fun TabId.iconRes(): Int = when (this) {
     TabId.HOME -> R.drawable.ic_tab_home
     TabId.SERVERS -> R.drawable.ic_tab_servers
+    TabId.MONITOR -> R.drawable.ic_tab_monitor
     TabId.TUNNELS -> R.drawable.ic_tab_tunnels
     TabId.SETTINGS -> R.drawable.ic_tab_settings
 }

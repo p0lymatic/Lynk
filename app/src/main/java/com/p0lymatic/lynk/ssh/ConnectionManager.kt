@@ -1,6 +1,7 @@
 package com.p0lymatic.lynk.ssh
 
 import android.content.Context
+import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -17,7 +18,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 
 /**
@@ -248,6 +251,38 @@ class ConnectionManager(private val context: Context, private val store: Store) 
             _terminals.value = (_terminals.value - 1).coerceAtLeast(0)
             onActivityChanged?.invoke()
             throw t
+        }
+    }
+
+    /**
+     * Runs one non-interactive command over the shared session and returns stdout.
+     * Used by the monitor: no PTY, so output arrives without carriage returns.
+     */
+    suspend fun exec(server: ServerConfig, command: String, timeoutMs: Int = 20_000): String {
+        val session = ensureConnected(server)
+        return withContext(Dispatchers.IO) {
+            val channel = session.openChannel("exec") as ChannelExec
+            val out = ByteArrayOutputStream()
+            val err = ByteArrayOutputStream()
+            try {
+                channel.setCommand(command)
+                channel.setInputStream(null)
+                channel.setErrStream(err, true)
+                channel.outputStream = out
+                channel.connect(timeoutMs)
+                val deadline = System.currentTimeMillis() + timeoutMs
+                while (!channel.isClosed && System.currentTimeMillis() < deadline) {
+                    if (!channel.isConnected) break
+                    Thread.sleep(30)
+                }
+                val text = out.toString("UTF-8")
+                if (text.isBlank() && channel.exitStatus != 0) {
+                    throw IOException("команда вернула код ${channel.exitStatus}: ${err.toString("UTF-8").trim().take(200)}")
+                }
+                text
+            } finally {
+                runCatching { channel.disconnect() }
+            }
         }
     }
 

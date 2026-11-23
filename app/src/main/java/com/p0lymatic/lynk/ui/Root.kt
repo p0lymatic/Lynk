@@ -130,9 +130,12 @@ fun LynkRoot(app: AppState) {
                         is Route.Tab -> when (destination.tab) {
                             TabId.HOME -> HomeScreen(app, nav, openMenu)
                             TabId.SERVERS -> ServersScreen(app, nav, openMenu)
+                            TabId.MONITOR -> MonitoringScreen(app, nav, openMenu)
                             TabId.TUNNELS -> TunnelsScreen(app, nav, openMenu)
                             TabId.SETTINGS -> SettingsScreen(app, nav, openMenu)
                         }
+
+                        is Route.MonitorSettings -> MonitorSettingsScreen(app, nav)
 
                         is Route.ServerDetail -> ServerDetailScreen(app, nav, destination.serverId)
                         is Route.ServerEdit -> ServerEditScreen(app, nav, destination.serverId)

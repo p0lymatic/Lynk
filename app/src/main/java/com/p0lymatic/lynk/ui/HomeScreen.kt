@@ -32,9 +32,12 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +46,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -54,6 +58,7 @@ import com.p0lymatic.lynk.data.Service
 import com.p0lymatic.lynk.ssh.ConnectionManager.Phase
 import com.p0lymatic.lynk.ui.theme.LynkColors
 import com.p0lymatic.lynk.ui.theme.Mono
+import com.p0lymatic.lynk.util.plural
 
 /** Result of understanding an address bar entry such as `3000`, `8080/admin` or `https://host:443/p`. */
 internal data class AddressInput(
@@ -96,6 +101,9 @@ internal fun parseAddressInput(raw: String): AddressInput? {
 fun HomeScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
     val data by app.store.state.collectAsStateWithLifecycle()
     val connStates by app.connections.states.collectAsStateWithLifecycle()
+    val samples by app.monitor.samples.collectAsStateWithLifecycle()
+    val monitorErrors by app.monitor.errors.collectAsStateWithLifecycle()
+    val monitorBusy by app.monitor.busy.collectAsStateWithLifecycle()
 
     var address by rememberSaveable { mutableStateOf("") }
     var selectedId by rememberSaveable { mutableStateOf("") }
@@ -108,6 +116,16 @@ fun HomeScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
         if (selectedId.isBlank() || data.servers.none { it.id == selectedId }) {
             selectedId = data.servers.firstOrNull()?.id ?: ""
         }
+    }
+
+    // Keep the gauge of the selected node alive while the start page is on screen.
+    LaunchedEffect(selectedId, data.monitor.enabled) {
+        val id = selectedId
+        if (data.monitor.enabled && id.isNotBlank()) app.monitor.watch(id)
+    }
+    DisposableEffect(selectedId) {
+        val id = selectedId
+        onDispose { if (id.isNotBlank()) app.monitor.unwatch(id) }
     }
 
     fun openAddress() {
@@ -239,11 +257,50 @@ fun HomeScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "${data.servers.size} узлов · ${data.services.size} сервисов",
+                    text = "${data.servers.size} ${plural(data.servers.size, "узел", "узла", "узлов")} · " +
+                        "${data.services.size} ${plural(data.services.size, "сервис", "сервиса", "сервисов")}",
                     fontFamily = Mono,
                     fontSize = 11.sp,
                     color = LynkColors.textMuted,
                 )
+
+                if (selected != null && data.monitor.enabled) {
+                    SectionLabel(
+                        text = "Мониторинг",
+                        trailing = {
+                            TextButton(onClick = { nav.selectTab(TabId.MONITOR) }) {
+                                Text("все узлы", fontSize = 11.sp, color = LynkColors.textMuted)
+                            }
+                        },
+                    )
+                    val nodeError = monitorErrors[selected.id]
+                    val nodeBusy = monitorBusy.contains(selected.id)
+                    val nodeSample = samples[selected.id]
+                    when {
+                        nodeError != null -> Text(
+                            text = nodeError,
+                            fontSize = 11.sp,
+                            color = LynkColors.err,
+                            modifier = Modifier.padding(bottom = 10.dp),
+                        )
+                        nodeSample == null && nodeBusy -> LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(2.dp).padding(bottom = 10.dp),
+                            color = LynkColors.textDim,
+                            trackColor = Color.Transparent,
+                        )
+                        nodeSample == null -> Text(
+                            text = "Подключаюсь к узлу…",
+                            fontFamily = Mono,
+                            fontSize = 11.sp,
+                            color = LynkColors.textMuted,
+                            modifier = Modifier.padding(bottom = 10.dp),
+                        )
+                        else -> {
+                            MetricsGrid(data.monitor, nodeSample)
+                            Spacer(Modifier.height(4.dp))
+                        }
+                    }
+                }
 
                 SectionLabel("Сервисы")
 

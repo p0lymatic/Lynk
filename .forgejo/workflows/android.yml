@@ -1,0 +1,153 @@
+# Forgejo Actions. Полные URL указаны явно, потому что DEFAULT_ACTIONS_URL у инстанса
+# может быть переопределён. Для зазеркаленных actions эквивалент — actions/<name>@<ref>.
+# setup-java, setup-android и setup-gradle на code.forgejo.org не зазеркалены (404),
+# поэтому для них взят GitHub-источник; для setup-android альтернативой был бы
+# https://code.forgejo.org/actions/setup-android@v3, но такого репозитория нет.
+name: Android CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Если ubuntu-latest не объявлен у вашего runner — замените на его метку (обычно docker).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4 # actions/checkout@v4
+
+      - name: JDK 17
+        uses: https://github.com/actions/setup-java@v4 # actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Пакеты платформы и build-tools заданы явно, чтобы не зависеть от авто-докачки AGP.
+      - name: Android SDK
+        uses: https://github.com/android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools platforms;android-35 build-tools;35.0.0'
+
+      # Кэш восстанавливается до setup-gradle, чтобы дистрибутив Gradle не качался заново.
+      - name: Cache Gradle
+        uses: https://code.forgejo.org/actions/cache@v4 # actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # В репозитории нет gradle/wrapper/ (и gradle-wrapper.jar): gradlew — тонкая
+      # обёртка над локальной установкой Gradle в ~/.gradle/wrapper/dists, в CI её нет.
+      # Поэтому ставим Gradle 8.11.1 и вызываем `gradle`.
+      - name: Gradle 8.11.1
+        uses: https://github.com/gradle/actions/setup-gradle@v4 # gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+          cache-disabled: true # кэш выше, через actions/cache@v4
+
+      - name: chmod gradlew
+        run: chmod +x gradlew
+
+      # Секреты не печатаются: base64 декодируется в файл, keystore.properties пишется из секрета.
+      - name: Restore signing key
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PROPERTIES: ${{ secrets.KEYSTORE_PROPERTIES }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PROPERTIES:-}" ]; then
+            echo "подпись недоступна, собираю debug"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # storeFile из keystore.properties резолвится относительно каталога модуля (:app).
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > app/release.jks
+          printf '%s\n' "$KEYSTORE_PROPERTIES" > keystore.properties
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test
+        run: |
+          if [ "${{ steps.signing.outputs.available }}" = "true" ]; then
+            gradle :app:assembleRelease :app:testDebugUnitTest --no-daemon
+          else
+            gradle :app:assembleDebug :app:testDebugUnitTest --no-daemon
+          fi
+
+      - name: Upload APKs
+        uses: https://code.forgejo.org/actions/upload-artifact@v4 # actions/upload-artifact@v4
+        with:
+          name: apk
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      - name: Upload test results
+        uses: https://code.forgejo.org/actions/upload-artifact@v4 # actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: app/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: error
+
+      # Секрет secrets.* в if: доступен, поэтому пропуск релиза без токена — в самом if:.
+      - name: Create release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FORGEJO_TOKEN:-}" ]; then
+            echo "FORGEJO_TOKEN не задан — релиз пропущен"
+            exit 0
+          fi
+          base="$API_URL/repos/$REPO"
+          api="$base/releases"
+          auth="Authorization: token ${FORGEJO_TOKEN}"
+          payload=$(TAG="$TAG" python3 -c 'import json,os;print(json.dumps({"tag_name":os.environ["TAG"],"name":os.environ["TAG"],"body":"сборка CI"}))')
+          resp=$(curl -sS -w '\n%{http_code}' -H "$auth" -H 'Content-Type: application/json' \
+            -d "$payload" "$api")
+          code=${resp##*$'\n'}
+          body=${resp%$'\n'*}
+          case "$code" in
+            201)
+              id=$(printf '%s' "$body" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+              ;;
+            409) # релиз для тега уже существует — берём его id
+              id=$(curl -sS -f -H "$auth" "$api/tags/$TAG" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+              ;;
+            *)
+              echo "не удалось создать релиз: HTTP $code" >&2
+              printf '%s\n' "$body" >&2
+              exit 1
+              ;;
+          esac
+          # Перезапуск по тому же тегу не должен падать на уже загруженных ассетах.
+          existing=$(curl -sS -f -H "$auth" "$api/${id}/assets" \
+            | python3 -c 'import json,sys;print("\n".join(a["name"] for a in json.load(sys.stdin)))')
+          while IFS= read -r apk; do
+            name=$(basename "$apk")
+            if printf '%s\n' "$existing" | grep -qxF "$name"; then
+              echo "уже загружен: $name"
+              continue
+            fi
+            status=$(curl -sS -o /dev/null -w '%{http_code}' -H "$auth" \
+              -F "attachment=@${apk}" "$api/${id}/assets?name=${name}")
+            echo "$status $name"
+            case "$status" in
+              201) ;;
+              *) echo "не удалось загрузить $name: HTTP $status" >&2; exit 1 ;;
+            esac
+          done < <(find app/build/outputs/apk -type f -name '*.apk' | sort)

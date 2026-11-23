@@ -1,6 +1,8 @@
 package com.p0lymatic.lynk.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -45,7 +47,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
@@ -547,4 +552,129 @@ private fun AddressField(
             }
         }
     }
+}
+
+// ---- operating system badge ---------------------------------------------------
+
+/**
+ * Small monochrome badge that tells you what is running on the other side.
+ * Simple geometry for the families where a shape is recognisable, a three-letter
+ * monogram for everything else — no logos, no colours, fits the strict grey theme.
+ */
+@Composable
+fun OsIcon(osId: String, modifier: Modifier = Modifier, size: Dp = 18.dp) {
+    val shape = RoundedCornerShape(size * 0.28f)
+    val tint = LynkColors.textDim
+    val id = osId.lowercase()
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(shape)
+            .background(LynkColors.surfaceHigh)
+            .border(1.dp, LynkColors.border, shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        when (id) {
+            "ubuntu" -> Canvas(Modifier.size(size * 0.66f)) {
+                val stroke = this.size.minDimension * 0.14f
+                drawCircle(tint, radius = this.size.minDimension * 0.30f, style = Stroke(stroke))
+                val orbit = this.size.minDimension * 0.40f
+                listOf(0f, 2.0944f, 4.18879f).forEach { angle ->
+                    drawCircle(
+                        color = tint,
+                        radius = stroke,
+                        center = Offset(
+                            x = center.x + kotlin.math.cos(angle) * orbit,
+                            y = center.y + kotlin.math.sin(angle) * orbit,
+                        ),
+                    )
+                }
+            }
+            "arch", "manjaro" -> Canvas(Modifier.size(size * 0.62f)) {
+                val w = this.size.width
+                val h = this.size.height
+                val path = Path().apply {
+                    moveTo(w / 2f, h * 0.10f)
+                    lineTo(w * 0.96f, h * 0.94f)
+                    lineTo(w * 0.60f, h * 0.94f)
+                    lineTo(w / 2f, h * 0.66f)
+                    lineTo(w * 0.40f, h * 0.94f)
+                    lineTo(w * 0.04f, h * 0.94f)
+                    close()
+                }
+                drawPath(path, tint)
+            }
+            "alpine" -> Canvas(Modifier.size(size * 0.66f)) {
+                val w = this.size.width
+                val h = this.size.height
+                val left = Path().apply {
+                    moveTo(w * 0.06f, h * 0.90f)
+                    lineTo(w * 0.34f, h * 0.28f)
+                    lineTo(w * 0.62f, h * 0.90f)
+                    close()
+                }
+                val right = Path().apply {
+                    moveTo(w * 0.44f, h * 0.90f)
+                    lineTo(w * 0.66f, h * 0.52f)
+                    lineTo(w * 0.94f, h * 0.90f)
+                    close()
+                }
+                drawPath(left, tint)
+                drawPath(right, tint)
+            }
+            "raspbian", "raspberrypi" -> Canvas(Modifier.size(size * 0.62f)) {
+                val r = this.size.minDimension * 0.18f
+                drawCircle(tint, r, Offset(center.x - r * 1.1f, center.y - r * 0.7f))
+                drawCircle(tint, r, Offset(center.x + r * 1.1f, center.y - r * 0.7f))
+                drawCircle(tint, r, Offset(center.x, center.y + r))
+            }
+            "windows" -> Canvas(Modifier.size(size * 0.60f)) {
+                val gap = this.size.minDimension * 0.08f
+                val cell = (this.size.minDimension - gap) / 2f
+                listOf(0f to 0f, cell + gap to 0f, 0f to cell + gap, cell + gap to cell + gap).forEach { (dx, dy) ->
+                    drawRect(
+                        color = tint,
+                        topLeft = Offset(dx, dy),
+                        size = androidx.compose.ui.geometry.Size(cell, cell),
+                    )
+                }
+            }
+            "macos", "darwin" -> Canvas(Modifier.size(size * 0.62f)) {
+                drawCircle(tint, radius = this.size.minDimension * 0.30f, center = Offset(center.x, center.y + this.size.minDimension * 0.06f))
+                drawLine(
+                    color = LynkColors.surfaceHigh,
+                    start = Offset(center.x, center.y - this.size.minDimension * 0.22f),
+                    end = Offset(center.x + this.size.minDimension * 0.14f, center.y - this.size.minDimension * 0.40f),
+                    strokeWidth = this.size.minDimension * 0.10f,
+                )
+            }
+            else -> {
+                val mono = osMonogram(id)
+                Text(
+                    text = mono,
+                    fontFamily = Mono,
+                    fontSize = (size.value * if (mono.length >= 4) 0.24f else 0.34f).sp,
+                    color = tint,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+private fun osMonogram(id: String): String = when (id) {
+    "debian" -> "DEB"
+    "fedora" -> "FED"
+    "centos", "rocky", "almalinux", "rhel", "redhat" -> "RH"
+    "opensuse", "sles" -> "SUSE"
+    "freebsd", "openbsd", "netbsd" -> "BSD"
+    "gentoo" -> "GNT"
+    "void" -> "VOID"
+    "nixos" -> "NIX"
+    "linux" -> "LX"
+    "mint" -> "MINT"
+    "kali" -> "KALI"
+    "pop" -> "POP"
+    "" , "unknown" -> "?"
+    else -> id.take(3).uppercase()
 }

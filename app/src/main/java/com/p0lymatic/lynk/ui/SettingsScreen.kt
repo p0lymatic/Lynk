@@ -63,6 +63,12 @@ fun SettingsScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
         )
 
         Column(Modifier.padding(horizontal = 16.dp)) {
+            SectionLabel("Мониторинг")
+            GhostButton(
+                text = "Плитки и порядок",
+                onClick = { nav.push(Route.MonitorSettings) },
+            )
+
             SectionLabel("Соединения")
             KeyRow("Активных сессий", activeCount.toString())
             KeyRow("Туннелей поднято", forwards.size.toString())

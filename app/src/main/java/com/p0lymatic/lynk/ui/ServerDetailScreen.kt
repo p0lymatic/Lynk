@@ -85,6 +85,28 @@ fun ServerDetailScreen(app: AppState, nav: Navigator, serverId: String) {
                     )
                 }
                 Spacer(Modifier.height(10.dp))
+                if (server.osId.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OsIcon(server.osId, size = 18.dp)
+                        Spacer(Modifier.width(9.dp))
+                        Text(
+                            text = server.osName.ifBlank { server.osId },
+                            fontSize = 12.sp,
+                            color = LynkColors.textDim,
+                            maxLines = 1,
+                        )
+                        if (server.osArch.isNotBlank()) {
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                text = server.osArch,
+                                fontFamily = Mono,
+                                fontSize = 10.5.sp,
+                                color = LynkColors.textMuted,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     GhostButton(
                         text = "Терминал",

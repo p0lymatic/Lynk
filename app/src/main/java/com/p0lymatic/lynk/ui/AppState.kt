@@ -30,6 +30,11 @@ class AppState(
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** Live CPU/RAM/disk samples for nodes that are currently on screen. */
+    val monitor = com.p0lymatic.lynk.ssh.MonitorHub(store, connections, scope) { server ->
+        connect(server)
+    }
+
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val messages: SharedFlow<String> = _messages
 

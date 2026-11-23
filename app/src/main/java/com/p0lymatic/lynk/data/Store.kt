@@ -126,6 +126,24 @@ class Store(private val context: Context) {
         data.copy(hostKeys = data.hostKeys.filterNot { it.host.equals(host, ignoreCase = true) && it.port == port })
     }
 
+    // ---- monitoring ----------------------------------------------------------
+
+    fun updateMonitor(settings: MonitorSettings) = mutate { data -> data.copy(monitor = settings) }
+
+    fun updateServerOs(serverId: String, osId: String, osName: String, osArch: String) = mutate { data ->
+        data.copy(
+            servers = data.servers.map { server ->
+                if (server.id != serverId) server
+                else server.copy(
+                    osId = osId,
+                    osName = osName,
+                    osArch = osArch,
+                    osCheckedAt = System.currentTimeMillis(),
+                )
+            },
+        )
+    }
+
     // ---- secrets -------------------------------------------------------------
 
     private fun secretKey(serverId: String, kind: String) = "${kind}_$serverId"

@@ -85,6 +85,10 @@ fun ServersScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
 
                     LynkCard(onClick = { nav.push(Route.ServerDetail(server.id)) }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (server.osId.isNotBlank()) {
+                                OsIcon(server.osId, size = 18.dp)
+                                Spacer(Modifier.width(9.dp))
+                            }
                             Text(
                                 text = server.name,
                                 fontSize = 14.5.sp,
