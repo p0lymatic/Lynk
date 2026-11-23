@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.view.ViewGroup
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
@@ -14,11 +13,12 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,9 +26,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -42,11 +44,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.p0lymatic.lynk.R
 import com.p0lymatic.lynk.data.Service
 import com.p0lymatic.lynk.ssh.ConnectionManager
 import com.p0lymatic.lynk.ui.theme.LynkColors
@@ -74,6 +80,7 @@ fun BrowserScreen(
     host: String,
 ) {
     val context = LocalContext.current
+    val focus = LocalFocusManager.current
     val server = app.store.server(serverId)
 
     var forward by remember { mutableStateOf<ConnectionManager.LocalForward?>(null) }
@@ -85,8 +92,9 @@ fun BrowserScreen(
     var sslBypassed by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
     var showSave by remember { mutableStateOf(false) }
-
-    val target = "${if (host.isBlank()) "127.0.0.1" else host}:$port"
+    var overflowOpen by remember { mutableStateOf(false) }
+    val initialTarget = "${if (host.isBlank()) "127.0.0.1" else host}:$port"
+    var address by remember(serverId, port, scheme, path, host) { mutableStateOf("$initialTarget$path") }
 
     // Open (or reuse) the SSH forward for the lifetime of this screen.
     LaunchedEffect(serverId, port, reloadKey) {
@@ -112,7 +120,7 @@ fun BrowserScreen(
         }
         if (opened == null) {
             loadError = app.connections.connState(serverId).error
-                ?: "Не удалось открыть туннель к $target"
+                ?: "Не удалось открыть туннель к $initialTarget"
         }
         forward = opened
     }
@@ -124,6 +132,12 @@ fun BrowserScreen(
     }
 
     val url = forward?.let { "${scheme.lowercase()}://127.0.0.1:${it.localPort}${normalizePath(path)}" }
+    val loading = progress in 1..99
+    val contentAlpha by animateFloatAsState(
+        targetValue = if (loading) 0.35f else 1f,
+        animationSpec = tween(220),
+        label = "pageAlpha",
+    )
 
     BackHandler {
         val wv = webViewHolder[0]
@@ -132,40 +146,108 @@ fun BrowserScreen(
 
     // Load whenever the tunnel address changes (first open or a manual retry).
     LaunchedEffect(url) {
-        url?.let { address -> webViewHolder[0]?.loadUrl(address) }
+        url?.let { target -> webViewHolder[0]?.loadUrl(target) }
+    }
+
+    fun submitAddress() {
+        val parsed = parseAddressInput(address) ?: run {
+            app.notify("Укажи порт, например 3000")
+            return
+        }
+        nav.push(
+            Route.Browser(
+                serverId = serverId,
+                serviceId = null,
+                port = parsed.port,
+                scheme = parsed.scheme,
+                path = parsed.path,
+                title = "Порт ${parsed.port}",
+                host = parsed.host,
+            ),
+        )
     }
 
     Column(Modifier.fillMaxSize().background(LynkColors.bg)) {
-        ScreenHeader(
-            title = pageTitle.ifBlank { title.ifBlank { "Порт $port" } },
-            subtitle = "${server?.name ?: "узел"} · $target",
-            onBack = { nav.pop() },
+        BrowserToolbar(
+            address = address,
+            onAddressChange = { address = it },
+            onSubmit = { focus.clearFocus(); submitAddress() },
+            addressPrefix = server?.name,
+            leading = {
+                IconButton(onClick = { nav.pop() }, modifier = Modifier.size(38.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_tab_home),
+                        contentDescription = "На старт-экран",
+                        tint = LynkColors.textDim,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            },
             actions = {
-                IconButton(onClick = { reloadKey++ }, modifier = Modifier.size(38.dp)) {
-                    Icon(Icons.Filled.Refresh, "Обновить", tint = LynkColors.textDim, modifier = Modifier.size(18.dp))
-                }
-                IconButton(
-                    onClick = {
-                        url?.let {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)))
-                            }
-                        }
-                    },
-                    modifier = Modifier.size(38.dp),
-                ) {
-                    Icon(Icons.Filled.Share, "Открыть в браузере", tint = LynkColors.textDim, modifier = Modifier.size(17.dp))
-                }
                 if (serviceId == null) {
                     IconButton(onClick = { showSave = true }, modifier = Modifier.size(38.dp)) {
-                        Icon(Icons.Filled.Star, "Сохранить сервис", tint = LynkColors.textDim, modifier = Modifier.size(18.dp))
+                        Icon(
+                            imageVector = Icons.Filled.Star,
+                            contentDescription = "Сохранить сервис",
+                            tint = LynkColors.textDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+                IconButton(onClick = { reloadKey++ }, modifier = Modifier.size(38.dp)) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Обновить",
+                        tint = LynkColors.textDim,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Box {
+                    IconButton(onClick = { overflowOpen = true }, modifier = Modifier.size(38.dp)) {
+                        Icon(
+                            imageVector = Icons.Filled.MoreVert,
+                            contentDescription = "Ещё",
+                            tint = LynkColors.textDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = overflowOpen,
+                        onDismissRequest = { overflowOpen = false },
+                        containerColor = LynkColors.surfaceHigh,
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Открыть в системном браузере", fontSize = 13.sp, color = LynkColors.text) },
+                            onClick = {
+                                overflowOpen = false
+                                url?.let {
+                                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) }
+                                }
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Копировать адрес", fontSize = 13.sp, color = LynkColors.text) },
+                            onClick = {
+                                overflowOpen = false
+                                val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+                                clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Lynk", url ?: address))
+                                app.notify("Адрес скопирован")
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Обновить", fontSize = 13.sp, color = LynkColors.text) },
+                            onClick = {
+                                overflowOpen = false
+                                reloadKey++
+                            },
+                        )
                     }
                 }
             },
         )
 
         Box(Modifier.fillMaxWidth().height(1.5.dp)) {
-            if (progress in 1..99) {
+            if (loading) {
                 LinearProgressIndicator(
                     progress = { progress / 100f },
                     modifier = Modifier.fillMaxSize(),
@@ -188,7 +270,7 @@ fun BrowserScreen(
         Box(Modifier.fillMaxSize()) {
             if (url != null) {
                 AndroidView(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().alpha(contentAlpha),
                     factory = { ctx ->
                         WebView(ctx).apply {
                             layoutParams = ViewGroup.LayoutParams(
@@ -213,9 +295,11 @@ fun BrowserScreen(
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     loadError = null
+                                    progress = 1
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
+                                    progress = 100
                                     view?.title?.takeIf { it.isNotBlank() }?.let { pageTitle = it }
                                 }
 
@@ -225,7 +309,8 @@ fun BrowserScreen(
                                     error: WebResourceError?,
                                 ) {
                                     if (request?.isForMainFrame == true) {
-                                        loadError = "Сервис не ответил на $target. Проверь, что он запущен на узле."
+                                        progress = 100
+                                        loadError = "Сервис не ответил на $initialTarget. Проверь, что он запущен на узле."
                                     }
                                 }
 

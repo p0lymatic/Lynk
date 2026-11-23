@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
@@ -43,6 +44,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -53,6 +60,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.p0lymatic.lynk.ssh.ConnectionManager
@@ -87,7 +95,8 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
     var status by remember { mutableStateOf(TerminalSession.Status.CONNECTING) }
     var error by remember { mutableStateOf<String?>(null) }
     var ctrl by remember { mutableStateOf(false) }
-    var input by remember { mutableStateOf("") }
+    var field by remember { mutableStateOf(TextFieldValue("")) }
+    var sentChars by remember { mutableStateOf(0) }
     var autoScroll by remember { mutableStateOf(true) }
     var reloadKey by remember { mutableStateOf(0) }
     var cols by remember { mutableStateOf(80) }
@@ -152,25 +161,36 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
 
     fun sendText(text: String) {
         val current = session ?: return
-        if (ctrl && text.isNotEmpty()) {
-            val first = text.first()
-            val code = when {
-                first in 'a'..'z' -> first.code - 'a'.code + 1
-                first in 'A'..'Z' -> first.code - 'A'.code + 1
-                first == '[' -> 27
-                first == ' ' -> 0
-                else -> first.code
+        runCatching {
+            if (ctrl && text.isNotEmpty()) {
+                val first = text.first()
+                val code = when {
+                    first in 'a'..'z' -> first.code - 'a'.code + 1
+                    first in 'A'..'Z' -> first.code - 'A'.code + 1
+                    first == '[' -> 27
+                    first == ' ' -> 0
+                    else -> first.code
+                }
+                current.sendBytes(byteArrayOf(code.toByte()))
+                if (text.length > 1) current.send(text.substring(1))
+                ctrl = false
+            } else {
+                current.send(text)
             }
-            current.sendBytes(byteArrayOf(code.toByte()))
-            if (text.length > 1) current.send(text.substring(1))
-            ctrl = false
-        } else {
-            current.send(text)
-        }
+        }.onFailure { app.notify(ConnectionManager.describe(it)) }
     }
 
     fun sendSequence(vararg bytes: Int) {
-        session?.sendBytes(ByteArray(bytes.size) { bytes[it].toByte() })
+        runCatching {
+            session?.sendBytes(ByteArray(bytes.size) { bytes[it].toByte() })
+        }
+    }
+
+    LaunchedEffect(status) {
+        if (status == TerminalSession.Status.CONNECTED) {
+            runCatching { focusRequester.requestFocus() }
+            keyboard?.show()
+        }
     }
 
     BackHandler { nav.pop() }
@@ -328,23 +348,49 @@ fun TerminalScreen(app: AppState, nav: Navigator, serverId: String) {
         }
 
         BasicTextField(
-            value = input,
+            value = field,
             onValueChange = { value ->
-                if (value.isNotEmpty()) {
-                    sendText(value)
-                    input = ""
+                field = value
+                // IME composition is left alone: clearing the field mid-composition is what
+                // crashes the input connection on some keyboards.
+                if (value.composition == null) {
+                    val text = value.text
+                    if (text.length > sentChars) sendText(text.substring(sentChars))
+                    sentChars = text.length
+                    if (text.length > 512) {
+                        field = TextFieldValue("")
+                        sentChars = 0
+                    }
                 }
             },
             modifier = Modifier
                 .size(1.dp)
-                .focusRequester(focusRequester),
+                .focusRequester(focusRequester)
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (event.key) {
+                        Key.Enter -> { sendSequence(13); true }
+                        Key.Backspace -> { sendSequence(127); true }
+                        Key.Escape -> { sendSequence(27); true }
+                        Key.Tab -> { sendSequence(9); true }
+                        Key.DirectionUp -> { sendSequence(27, 91, 65); true }
+                        Key.DirectionDown -> { sendSequence(27, 91, 66); true }
+                        Key.DirectionRight -> { sendSequence(27, 91, 67); true }
+                        Key.DirectionLeft -> { sendSequence(27, 91, 68); true }
+                        Key.MoveHome -> { sendSequence(27, 91, 72); true }
+                        Key.MoveEnd -> { sendSequence(27, 91, 70); true }
+                        else -> false
+                    }
+                },
             keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Ascii,
+                keyboardType = KeyboardType.Password,
                 imeAction = ImeAction.None,
                 autoCorrectEnabled = false,
             ),
+            keyboardActions = KeyboardActions(onAny = {}),
+            singleLine = false,
             textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-            cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.Transparent),
+            cursorBrush = SolidColor(Color.Transparent),
         )
     }
 }

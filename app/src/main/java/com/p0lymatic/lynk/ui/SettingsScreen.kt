@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -33,7 +34,7 @@ import com.p0lymatic.lynk.ui.theme.Mono
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(app: AppState, nav: Navigator) {
+fun SettingsScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
     val data by app.store.state.collectAsStateWithLifecycle()
     val connStates by app.connections.states.collectAsStateWithLifecycle()
     val forwards by app.connections.forwards.collectAsStateWithLifecycle()
@@ -49,6 +50,16 @@ fun SettingsScreen(app: AppState, nav: Navigator) {
             title = "Настройки",
             subtitle = "Lynk ${BuildConfig.VERSION_NAME}",
             onBack = null,
+            actions = {
+                IconButton(onClick = onMenu) {
+                    Icon(
+                        imageVector = Icons.Filled.Menu,
+                        contentDescription = "Меню",
+                        tint = LynkColors.textDim,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            },
         )
 
         Column(Modifier.padding(horizontal = 16.dp)) {

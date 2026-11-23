@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,7 +37,7 @@ import com.p0lymatic.lynk.ui.theme.LynkColors
 import com.p0lymatic.lynk.ui.theme.Mono
 
 @Composable
-fun TunnelsScreen(app: AppState, nav: Navigator) {
+fun TunnelsScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
     val data by app.store.state.collectAsStateWithLifecycle()
     val forwards by app.connections.forwards.collectAsStateWithLifecycle()
     val tunnelErrors by app.connections.tunnelErrors.collectAsStateWithLifecycle()
@@ -58,6 +59,14 @@ fun TunnelsScreen(app: AppState, nav: Navigator) {
             subtitle = "Локальные порты через SSH",
             onBack = null,
             actions = {
+                IconButton(onClick = onMenu) {
+                    Icon(
+                        imageVector = Icons.Filled.Menu,
+                        contentDescription = "Меню",
+                        tint = LynkColors.textDim,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
                 IconButton(
                     onClick = { createTunnel() },
                     modifier = Modifier.size(38.dp),

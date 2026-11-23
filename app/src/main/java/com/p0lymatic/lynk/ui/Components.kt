@@ -1,6 +1,12 @@
 package com.p0lymatic.lynk.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,8 +23,11 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -36,9 +45,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -279,7 +291,20 @@ fun StatusDot(phase: ConnectionManager.Phase, size: Dp = 7.dp) {
         ConnectionManager.Phase.ERROR -> LynkColors.err
         ConnectionManager.Phase.IDLE -> LynkColors.textMuted
     }
-    Box(Modifier.size(size).clip(CircleShape).background(color))
+    val alpha = if (phase == ConnectionManager.Phase.CONNECTING) {
+        rememberInfiniteTransition(label = "dot").animateFloat(
+            initialValue = 0.3f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(680, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "dotAlpha",
+        ).value
+    } else {
+        1f
+    }
+    Box(Modifier.size(size).clip(CircleShape).background(color.copy(alpha = alpha)))
 }
 
 @Composable
@@ -407,4 +432,119 @@ fun EditorColumn(content: @Composable ColumnScope.() -> Unit) {
             .padding(bottom = 24.dp),
         content = content,
     )
+}
+
+/**
+ * Browser-style top panel: leading icon, a pill-shaped address field and trailing actions.
+ * When [onAddressChange] is null the address is read-only text (the start screen shows the
+ * address of the page it will open, not the one on screen).
+ */
+@Composable
+fun BrowserToolbar(
+    address: String,
+    onAddressChange: ((String) -> Unit)?,
+    onSubmit: () -> Unit,
+    addressPrefix: String? = null,
+    modifier: Modifier = Modifier,
+    leading: @Composable () -> Unit,
+    actions: @Composable RowScope.() -> Unit,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth().height(54.dp).background(LynkColors.bg).padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        leading()
+        Spacer(Modifier.width(4.dp))
+        AddressField(
+            address = address,
+            onAddressChange = onAddressChange,
+            onSubmit = onSubmit,
+            addressPrefix = addressPrefix,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(4.dp))
+        actions()
+    }
+}
+
+@Composable
+private fun AddressField(
+    address: String,
+    onAddressChange: ((String) -> Unit)?,
+    onSubmit: () -> Unit,
+    addressPrefix: String?,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.height(38.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = LynkColors.surfaceHigh,
+        border = BorderStroke(1.dp, LynkColors.border),
+    ) {
+        val focus = LocalFocusManager.current
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!addressPrefix.isNullOrBlank()) {
+                Text(
+                    text = addressPrefix,
+                    fontFamily = Mono,
+                    fontSize = 11.sp,
+                    color = LynkColors.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 96.dp),
+                )
+                Text(" · ", fontFamily = Mono, fontSize = 11.sp, color = LynkColors.textMuted)
+            }
+            if (onAddressChange == null) {
+                Text(
+                    text = address,
+                    fontFamily = Mono,
+                    fontSize = 12.5.sp,
+                    color = LynkColors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    if (address.isEmpty()) {
+                        Text(
+                            text = "порт или хост:порт",
+                            fontFamily = Mono,
+                            fontSize = 12.5.sp,
+                            color = LynkColors.textMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    BasicTextField(
+                        value = address,
+                        onValueChange = onAddressChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = Mono,
+                            fontSize = 12.5.sp,
+                            color = LynkColors.text,
+                        ),
+                        cursorBrush = SolidColor(LynkColors.accent),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Go,
+                            autoCorrectEnabled = false,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onGo = {
+                                focus.clearFocus()
+                                onSubmit()
+                            },
+                        ),
+                    )
+                }
+            }
+        }
+    }
 }
