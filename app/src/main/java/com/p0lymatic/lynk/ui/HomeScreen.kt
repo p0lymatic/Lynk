@@ -255,15 +255,9 @@ fun HomeScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
 
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "${data.servers.size} ${plural(data.servers.size, "узел", "узла", "узлов")} · " +
-                        "${data.services.size} ${plural(data.services.size, "сервис", "сервиса", "сервисов")}",
-                    fontFamily = Mono,
-                    fontSize = 11.sp,
-                    color = LynkColors.textMuted,
-                )
+                Spacer(Modifier.height(if (selected != null && data.monitor.enabled) 0.dp else 10.dp))
 
+                // Gauges live at the very top: it is the first thing you want to see when you open the app.
                 if (selected != null && data.monitor.enabled) {
                     SectionLabel(
                         text = "Мониторинг",
@@ -301,6 +295,15 @@ fun HomeScreen(app: AppState, nav: Navigator, onMenu: () -> Unit) {
                         }
                     }
                 }
+
+                Text(
+                    text = "${data.servers.size} ${plural(data.servers.size, "узел", "узла", "узлов")} · " +
+                        "${data.services.size} ${plural(data.services.size, "сервис", "сервиса", "сервисов")}",
+                    fontFamily = Mono,
+                    fontSize = 11.sp,
+                    color = LynkColors.textMuted,
+                    modifier = Modifier.padding(top = if (selected != null && data.monitor.enabled) 6.dp else 0.dp),
+                )
 
                 SectionLabel("Сервисы")
 
